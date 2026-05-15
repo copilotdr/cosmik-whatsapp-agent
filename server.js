@@ -74,10 +74,20 @@ app.post("/webhook", async (req, res) => {
       text
     });
 
-    const reply = await generateSalesReply({
-      customerPhone: from,
-      message: text
-    });
+    let reply;
+
+    try {
+      reply = await generateSalesReply({
+        customerPhone: from,
+        message: text
+      });
+    } catch (aiError) {
+      console.error("Error generando respuesta con OpenAI:");
+      console.error(aiError.response?.data || aiError.message);
+
+      reply =
+        "Hola 💕 Gracias por escribir a Cosmik. Estamos revisando tu mensaje y te responderemos en breve.";
+    }
 
     await sendWhatsAppMessage(from, reply);
 
