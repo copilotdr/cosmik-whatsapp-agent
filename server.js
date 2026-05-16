@@ -3,16 +3,17 @@ import axios from "axios";
 import OpenAI from "openai";
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "cosmik_webhook_2026";
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+const WABA_ID = process.env.WABA_ID || "1997668764206548";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v25.0";
 
-const openai = new OpenAI({
-  apiKey: OPENAI_API_KEY
-});
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
 app.get("/", (req, res) => {
   res.status(200).send("Cosmik WhatsApp Agent is running.");
@@ -22,17 +23,16 @@ app.get("/health", (req, res) => {
   res.status(200).send("OK");
 });
 
-// Meta usa esta ruta para verificar tu webhook
+app.get("/privacy", (req, res) => {
+  res.type("html").send("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Privacy Policy | Cosmik</title><style>body{font-family:Arial,sans-serif;line-height:1.6;margin:0;padding:40px 20px;background:#fffaf6;color:#241f1b}main{max-width:820px;margin:0 auto}a{color:#7a4b2a}</style></head><body><main><h1>Privacy Policy</h1><p>Last updated: May 15, 2026</p><p>Cosmik collects customer information such as name, phone number, delivery address, order details, payment preference, and messages sent through WhatsApp or our website in order to process orders, provide customer support, coordinate deliveries, and improve our service.</p><h2>How we use information</h2><p>We use customer information to answer questions, recommend products, prepare and confirm orders, coordinate delivery, provide support, and keep internal records related to purchases and service requests.</p><h2>Sharing information</h2><p>We do not sell personal information. We may share only the information necessary with service providers, delivery partners, payment providers, or internal tools when required to complete a purchase, provide support, or comply with applicable obligations.</p><h2>WhatsApp communications</h2><p>When customers contact Cosmik through WhatsApp, we may process message content and contact details to respond, guide the purchase process, and follow up on orders.</p><h2>Customer rights</h2><p>Customers may contact us to request access, correction, or deletion of their personal information where applicable.</p><h2>Contact</h2><p>Email: <a href=\"mailto:equipocosmik@gmail.com\">equipocosmik@gmail.com</a></p><p>Website: <a href=\"https://www.wearecosmik.com/\">https://www.wearecosmik.com/</a></p></main></body></html>");
+});
+
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
 
-  console.log("Verificación de webhook recibida:", {
-    mode,
-    token,
-    challenge
-  });
+  console.log("Verificacion de webhook recibida:", { mode, token, challenge });
 
   if (mode === "subscribe" && token === VERIFY_TOKEN) {
     console.log("Webhook verificado correctamente.");
@@ -43,15 +43,14 @@ app.get("/webhook", (req, res) => {
   return res.sendStatus(403);
 });
 
-// Aquí llegan los mensajes de WhatsApp
 app.post("/webhook", async (req, res) => {
   try {
     const body = req.body;
-
     console.log("Webhook POST recibido:");
     console.log(JSON.stringify(body, null, 2));
 
-    const message = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    const value = body.entry?.[0]?.changes?.[0]?.value;
+    const message = value?.messages?.[0];
 
     if (!message) {
       console.log("No hay mensaje nuevo. Puede ser un status/update de WhatsApp.");
@@ -62,138 +61,54 @@ app.post("/webhook", async (req, res) => {
     const text = message.text?.body || "";
 
     if (!text) {
-      await sendWhatsAppMessage(
-        from,
-        "Hola 💕 Por ahora solo puedo leer mensajes de texto. Escríbeme qué estás buscando y te ayudo."
-      );
+      await sendWhatsAppMessage(from, "Hola. Por ahora solo puedo leer mensajes de texto. Escribeme que estas buscando y te ayudo.");
       return res.sendStatus(200);
     }
 
-    console.log("Mensaje recibido:", {
-      from,
-      text
-    });
+    console.log("Mensaje recibido:", { from, text });
 
     let reply;
-
     try {
-      reply = await generateSalesReply({
-        customerPhone: from,
-        message: text
-      });
+      reply = await generateSalesReply({ customerPhone: from, message: text });
     } catch (aiError) {
       console.error("Error generando respuesta con OpenAI:");
       console.error(aiError.response?.data || aiError.message);
-
-      reply =
-        "Hola 💕 Gracias por escribir a Cosmik. Estamos revisando tu mensaje y te responderemos en breve.";
+      reply = "Hola. Gracias por escribir a Cosmik. Estamos revisando tu mensaje y te responderemos en breve.";
     }
 
     await sendWhatsAppMessage(from, reply);
-
     console.log("Respuesta enviada correctamente a:", from);
-
     return res.sendStatus(200);
   } catch (error) {
     console.error("Error en webhook:");
     console.error(error.response?.data || error.message);
-
     return res.sendStatus(200);
   }
 });
 
-// Cerebro de ventas de Cosmik
 async function generateSalesReply({ customerPhone, message }) {
   if (!OPENAI_API_KEY) {
     console.log("Falta OPENAI_API_KEY en Render.");
-    return "Hola 💕 Gracias por escribir a Cosmik. En este momento estoy teniendo un problema técnico, pero ya el equipo recibió tu mensaje.";
+    return "Hola. Gracias por escribir a Cosmik. En este momento estoy teniendo un problema tecnico, pero ya el equipo recibio tu mensaje.";
   }
 
-  const businessInfo = `
-Eres el asistente de ventas de Cosmik, una marca de velas creativas, decorativas y personalizadas.
-
-Tu trabajo:
-- Responder preguntas de clientes.
-- Recomendar productos según la ocasión.
-- Ayudar a cerrar ventas por WhatsApp.
-- Tomar pedidos paso a paso.
-- Pedir la información que falte.
-- Hablar como una persona real, no como robot.
-- Mantener mensajes cortos, claros y naturales.
-
-Tono de Cosmik:
-- Cercano.
-- Dulce.
-- Claro.
-- Amable.
-- Vendedor, pero no intenso.
-- Natural, como alguien que quiere ayudar de verdad.
-
-Reglas importantes:
-- No inventes precios.
-- No inventes disponibilidad.
-- No prometas fechas exactas si no tienes esa información.
-- Si no sabes algo, di que vas a confirmarlo con el equipo.
-- No digas que eres inteligencia artificial.
-- No digas "como modelo de lenguaje".
-- No mandes mensajes demasiado largos.
-- Haz una pregunta a la vez cuando estés tomando un pedido.
-- Siempre intenta mover la conversación al siguiente paso de compra.
-
-Información actual de Cosmik:
-Cosmik vende velas creativas, decorativas y personalizadas para regalos, cumpleaños, detalles románticos, decoración, ocasiones especiales y fechas como Día de la Madre.
-
-Productos que Cosmik puede trabajar según lo conocido:
-- Velas de ramen.
-- Velas de rana.
-- Velas de capibara.
-- Velas de mariposa.
-- Velas de tulipanes.
-- Velas florales.
-- Velas personalizadas.
-- Velas decorativas para regalo.
-
-Todavía no tienes el catálogo completo con precios exactos, por eso:
-- Si preguntan precio específico, responde que vas a confirmarlo con el equipo.
-- Si preguntan disponibilidad, responde que vas a verificar.
-- Si preguntan por un producto general, puedes orientar y pedir más detalles.
-
-Datos que debes pedir para armar un pedido:
-1. Producto o tipo de vela que quiere.
-2. Cantidad.
-3. Color o estilo.
-4. Aroma, si aplica.
-5. Nombre de la persona que ordena.
-6. Dirección de entrega.
-7. Fecha deseada.
-8. Método de pago.
-9. Si es regalo, preguntar si desea mensaje personalizado.
-
-Ejemplo de estilo:
-Cliente: Hola, quiero una vela para regalo.
-Respuesta ideal: ¡Hola! Claro que sí 💕 ¿Es para cumpleaños, amor, mamá, amistad o alguna ocasión especial? Así te recomiendo una opción que vaya mejor con el regalo.
-
-Cliente: Cuánto cuesta?
-Respuesta ideal: Te confirmo el precio exacto con el equipo 💕 ¿Cuál modelo te gustó o qué tipo de vela estás buscando?
-
-Cliente: Quiero comprar.
-Respuesta ideal: Perfecto 💕 Para ayudarte con el pedido, dime primero cuál vela quieres y para qué fecha la necesitas.
-
-Objetivo:
-Ayudar al cliente con cariño, llevarlo a elegir un producto y recopilar la información necesaria para que el equipo de Cosmik pueda preparar y enviar el pedido.
-`;
+  const businessInfo = [
+    "Eres el asistente de ventas de Cosmik, una marca de velas creativas, decorativas y personalizadas.",
+    "Responde en espanol con tono cercano, dulce, claro y comercial.",
+    "Ayuda a recomendar productos segun ocasion, color, aroma, forma, tamano y cantidad.",
+    "No inventes precios, stock, promociones ni fechas exactas.",
+    "Si falta informacion, haz una sola pregunta concreta a la vez.",
+    "Para tomar un pedido pide producto, cantidad, color, aroma, nombre, direccion, fecha deseada, metodo de pago y mensaje personalizado si aplica.",
+    "Si preguntan por precios o disponibilidad que no conoces, di que lo confirmaras con el equipo.",
+    "Mantén mensajes cortos y naturales para WhatsApp.",
+    "Guia al cliente hacia elegir un producto y confirmar el pedido."
+  ].join("\n");
 
   const response = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
+    model: OPENAI_MODEL,
     messages: [
-      {
-        role: "system",
-        content: businessInfo
-      },
-      {
-        role: "user",
-        content: `Cliente con teléfono ${customerPhone} escribió: ${message}`
-      }
+      { role: "system", content: businessInfo },
+      { role: "user", content: "Cliente con telefono " + customerPhone + " escribio: " + message }
     ],
     temperature: 0.7,
     max_tokens: 350
@@ -202,23 +117,12 @@ Ayudar al cliente con cariño, llevarlo a elegir un producto y recopilar la info
   return response.choices[0].message.content;
 }
 
-// Esta función envía el mensaje por WhatsApp
 async function sendWhatsAppMessage(to, message) {
-  if (!WHATSAPP_TOKEN) {
-    throw new Error("Falta WHATSAPP_TOKEN en Render.");
-  }
+  if (!WHATSAPP_TOKEN) throw new Error("Falta WHATSAPP_TOKEN en Render.");
+  if (!PHONE_NUMBER_ID) throw new Error("Falta PHONE_NUMBER_ID en Render.");
 
-  if (!PHONE_NUMBER_ID) {
-    throw new Error("Falta PHONE_NUMBER_ID en Render.");
-  }
-
-  const url = `https://graph.facebook.com/v25.0/${PHONE_NUMBER_ID}/messages`;
-
-  console.log("Enviando mensaje a WhatsApp:", {
-    to,
-    url,
-    message
-  });
+  const url = "https://graph.facebook.com/" + GRAPH_VERSION + "/" + PHONE_NUMBER_ID + "/messages";
+  console.log("Enviando mensaje a WhatsApp:", { to, url, message });
 
   const response = await axios.post(
     url,
@@ -226,13 +130,11 @@ async function sendWhatsAppMessage(to, message) {
       messaging_product: "whatsapp",
       to,
       type: "text",
-      text: {
-        body: message
-      }
+      text: { body: message.slice(0, 3900) }
     },
     {
       headers: {
-        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+        Authorization: "Bearer " + WHATSAPP_TOKEN,
         "Content-Type": "application/json"
       }
     }
@@ -242,8 +144,25 @@ async function sendWhatsAppMessage(to, message) {
   console.log(response.data);
 }
 
+async function subscribeWabaToApp() {
+  if (!WHATSAPP_TOKEN || !WABA_ID) {
+    console.log("No se puede suscribir WABA: faltan WHATSAPP_TOKEN o WABA_ID.");
+    return;
+  }
+
+  try {
+    const url = "https://graph.facebook.com/" + GRAPH_VERSION + "/" + WABA_ID + "/subscribed_apps";
+    const response = await axios.post(url, {}, { headers: { Authorization: "Bearer " + WHATSAPP_TOKEN } });
+    console.log("WABA subscribed_apps actualizado:", response.data);
+  } catch (error) {
+    console.error("No se pudo suscribir la app al WABA:");
+    console.error(error.response?.data || error.message);
+  }
+}
+
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () => {
-  console.log(`Servidor activo en puerto ${PORT}`);
+app.listen(PORT, async () => {
+  console.log("Servidor activo en puerto " + PORT);
+  await subscribeWabaToApp();
 });
