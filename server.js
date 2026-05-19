@@ -89,7 +89,7 @@ app.get("/privacy", (_req, res) => {
 });
 
 app.get("/api/dashboard", async (req, res) => {
-  if (!config.dashboardToken || req.query.token !== config.dashboardToken) {
+  if (!isAuthorizedAdmin(req)) {
     res.sendStatus(401);
     return;
   }
@@ -103,6 +103,45 @@ app.get("/api/dashboard", async (req, res) => {
       conversations: [],
       error: "dashboard_unavailable"
     });
+  }
+});
+
+app.get("/api/manual-overrides", async (req, res) => {
+  if (!isAuthorizedAdmin(req)) {
+    res.sendStatus(401);
+    return;
+  }
+
+  try {
+    res.json(await readManualOverrides());
+  } catch (error) {
+    console.error("Manual overrides read failed:", error.response?.data || error.message);
+    res.status(500).json({ error: "manual_overrides_unavailable" });
+  }
+});
+
+app.post("/api/manual-overrides", async (req, res) => {
+  if (!isAuthorizedAdmin(req)) {
+    res.sendStatus(401);
+    return;
+  }
+
+  const whatsapp = normalizeWhatsapp(req.body?.whatsapp);
+  if (!whatsapp) {
+    res.status(400).json({ error: "whatsapp_required" });
+    return;
+  }
+
+  try {
+    const override = await setManualOverride({
+      whatsapp,
+      active: req.body?.active !== false,
+      note: req.body?.note || null
+    });
+    res.json(override);
+  } catch (error) {
+    console.error("Manual override update failed:", error.response?.data || error.message);
+    res.status(500).json({ error: "manual_override_update_failed" });
   }
 });
 
@@ -128,6 +167,16 @@ app.post("/webhook", async (req, res) => {
     processedMessageIds.add(message.id);
 
     console.log("Mensaje recibido:", message.from, message.text);
+    if (await isManualOverrideActive(message.from)) {
+      await appendConversation({
+        ...message,
+        reply: "[Modo manual activo: el bot no respondio automaticamente.]"
+      });
+      await notifyManualOverrideMessage(message);
+      console.log(`Modo manual activo para ${message.from}; no se envio respuesta automatica.`);
+      continue;
+    }
+
     const history = await getRecentConversation(message.from);
     const reply = await buildReply(message, history);
 
@@ -446,6 +495,46 @@ async function readDashboardData() {
   };
 }
 
+async function readManualOverrides() {
+  if (!supabaseEnabled()) return [];
+
+  return supabaseGet("manual_overrides", {
+    select: "*",
+    order: "updated_at.desc",
+    limit: "250"
+  });
+}
+
+async function setManualOverride({ whatsapp, active, note }) {
+  const now = new Date().toISOString();
+  const row = {
+    customer_whatsapp: whatsapp,
+    active: Boolean(active),
+    note,
+    updated_at: now
+  };
+
+  await supabaseUpsert("manual_overrides", row);
+  return row;
+}
+
+async function isManualOverrideActive(customerWhatsapp) {
+  if (!supabaseEnabled()) return false;
+
+  try {
+    const rows = await supabaseGet("manual_overrides", {
+      select: "active",
+      customer_whatsapp: `eq.${customerWhatsapp}`,
+      limit: "1"
+    });
+
+    return rows[0]?.active === true;
+  } catch (error) {
+    console.error("Manual override check failed:", error.response?.data || error.message);
+    return false;
+  }
+}
+
 async function supabaseGet(table, params = {}) {
   const query = new URLSearchParams(params).toString();
   const response = await axios.get(`${config.supabaseUrl}/rest/v1/${table}?${query}`, {
@@ -470,6 +559,17 @@ function supabaseHeaders() {
 
 function supabaseEnabled() {
   return Boolean(config.supabaseUrl && config.supabaseServiceRoleKey);
+}
+
+function isAuthorizedAdmin(req) {
+  if (!config.dashboardToken) return false;
+  const authHeader = req.headers.authorization || "";
+  const bearerToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+  return req.query.token === config.dashboardToken || bearerToken === config.dashboardToken;
+}
+
+function normalizeWhatsapp(value = "") {
+  return value.toString().replace(/\D/g, "");
 }
 
 async function notifyTelegram(order) {
@@ -505,6 +605,27 @@ async function notifyTelegram(order) {
     console.log("Telegram order notification sent:", order.id || order.from);
   } catch (error) {
     console.error("Telegram notification failed:", error.response?.data || error.message);
+  }
+}
+
+async function notifyManualOverrideMessage(message) {
+  if (!config.telegramBotToken || !config.telegramChatId) return;
+
+  const text = [
+    "Modo manual activo",
+    `Cliente: ${message.name || "Sin nombre"}`,
+    `WhatsApp: ${message.from}`,
+    `Mensaje: ${message.text}`,
+    "El bot no respondio automaticamente."
+  ].join("\n");
+
+  try {
+    await axios.post(`https://api.telegram.org/bot${config.telegramBotToken}/sendMessage`, {
+      chat_id: config.telegramChatId,
+      text
+    });
+  } catch (error) {
+    console.error("Manual override Telegram notification failed:", error.response?.data || error.message);
   }
 }
 
