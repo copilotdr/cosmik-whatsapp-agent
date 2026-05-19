@@ -25,6 +25,7 @@ const config = {
 const app = express();
 const openai = new OpenAI({ apiKey: config.openaiApiKey });
 const processedMessageIds = new Set();
+const memoryConversations = new Map();
 
 const knowledgeBase = {
   brand: {
@@ -132,7 +133,7 @@ app.post("/webhook", async (req, res) => {
       await captureConfirmedOrder(message, reply, history);
       console.log(`Respuesta enviada a ${message.from}`);
     } catch (error) {
-      console.error("No se pudo procesar el mensaje:", error.response?.data || error.message);
+      console.error("No se pudo completar el post-proceso:", error.response?.data || error.message);
     }
   }
 });
@@ -174,9 +175,7 @@ async function buildReply(message, history = []) {
         ...historyToOpenAiMessages(history),
         {
           role: "user",
-          content: message.name
-            ? `${message.name} escribe por WhatsApp: ${message.text}`
-            : message.text
+          content: `Cliente escribe por WhatsApp: ${message.text}`
         }
       ],
       max_completion_tokens: 450
@@ -210,6 +209,9 @@ Reglas:
 - Usa el historial de conversacion para continuar el proceso; no vuelvas a saludar ni a empezar desde cero si el cliente ya esta avanzando un pedido.
 - Si el cliente responde algo corto como "si", "confirmo", un telefono, una direccion, un color o un aroma, interpretalo segun la ultima pregunta del asistente.
 - Si ya hay un pedido en curso, conserva los datos ya dados y pide solamente el dato faltante mas importante.
+- No uses el nombre del perfil de WhatsApp para saludar o dirigirte a la persona, porque puede sentirse invasivo.
+- Usa saludos neutrales como "Hola", "Perfecto", "Súper", "Listo" o "Qué lindo".
+- Solo usa un nombre si el cliente lo escribe explicitamente como su nombre o como el nombre de la persona que recibe el pedido.
 - Antes de cerrar, resume el pedido y pregunta si confirma.
 - Si el cliente confirma, responde breve y avisa que el equipo revisara el pedido.
 - Mantén respuestas cortas para WhatsApp.
@@ -291,7 +293,9 @@ async function analyzeOrder(message, reply, history = []) {
 }
 
 async function getRecentConversation(customerWhatsapp) {
-  if (!supabaseEnabled()) return [];
+  const memoryHistory = memoryConversations.get(customerWhatsapp) || [];
+
+  if (!supabaseEnabled()) return memoryHistory;
 
   try {
     const rows = await supabaseGet("conversations", {
@@ -301,11 +305,18 @@ async function getRecentConversation(customerWhatsapp) {
       limit: String(config.maxConversationTurns)
     });
 
-    return rows.reverse();
+    const persistedHistory = rows.reverse();
+    return persistedHistory.length ? persistedHistory : memoryHistory;
   } catch (error) {
     console.error("Conversation history read failed:", error.response?.data || error.message);
-    return [];
+    return memoryHistory;
   }
+}
+
+function rememberConversation(customerWhatsapp, turn) {
+  const history = memoryConversations.get(customerWhatsapp) || [];
+  history.push(turn);
+  memoryConversations.set(customerWhatsapp, history.slice(-config.maxConversationTurns));
 }
 
 function historyToOpenAiMessages(history) {
@@ -322,60 +333,74 @@ function historyToOpenAiMessages(history) {
 }
 
 async function appendConversation(event) {
-  if (!supabaseEnabled()) return;
-
-  const now = new Date().toISOString();
-  await supabaseUpsert("customers", {
-    id: event.from,
-    whatsapp: event.from,
-    name: event.name || null,
-    last_seen_at: now,
-    updated_at: now
-  });
-
-  await supabaseUpsert("conversations", {
-    id: event.id,
-    whatsapp_message_id: event.id,
-    customer_id: event.from,
-    customer_whatsapp: event.from,
-    customer_name: event.name || null,
+  rememberConversation(event.from, {
     incoming_text: event.text,
     assistant_reply: event.reply,
-    created_at: now
+    created_at: new Date().toISOString()
   });
+
+  if (!supabaseEnabled()) return;
+
+  try {
+    const now = new Date().toISOString();
+    await supabaseUpsert("customers", {
+      id: event.from,
+      whatsapp: event.from,
+      name: event.name || null,
+      last_seen_at: now,
+      updated_at: now
+    });
+
+    await supabaseUpsert("conversations", {
+      id: event.id,
+      whatsapp_message_id: event.id,
+      customer_id: event.from,
+      customer_whatsapp: event.from,
+      customer_name: event.name || null,
+      incoming_text: event.text,
+      assistant_reply: event.reply,
+      created_at: now
+    });
+  } catch (error) {
+    console.error("Conversation persistence failed:", error.response?.data || error.message);
+  }
 }
 
 async function appendOrder(order) {
   if (!supabaseEnabled()) return;
 
-  const now = new Date().toISOString();
-  await supabaseUpsert("customers", {
-    id: order.from,
-    whatsapp: order.from,
-    name: order.customerName || null,
-    last_seen_at: now,
-    updated_at: now
-  });
+  try {
+    const now = new Date().toISOString();
+    await supabaseUpsert("customers", {
+      id: order.from,
+      whatsapp: order.from,
+      name: order.customerName || null,
+      last_seen_at: now,
+      updated_at: now
+    });
 
-  await supabaseUpsert("orders", {
-    id: order.id || `order_${Date.now()}`,
-    whatsapp_message_id: order.id || null,
-    customer_id: order.from,
-    customer_whatsapp: order.from,
-    customer_name: order.customerName || null,
-    status: "nuevo",
-    priority: "normal",
-    product: order.product || null,
-    quantity: parseInt(order.quantity, 10) || null,
-    color: order.color || null,
-    scent: order.scent || null,
-    personal_message: order.personalMessage || null,
-    delivery_address: order.address || null,
-    desired_delivery_date: parseDate(order.deliveryDate),
-    payment_method: order.paymentMethod || null,
-    summary: order.summary || null,
-    updated_at: now
-  });
+    await supabaseUpsert("orders", {
+      id: order.id || `order_${Date.now()}`,
+      whatsapp_message_id: order.id || null,
+      customer_id: order.from,
+      customer_whatsapp: order.from,
+      customer_name: order.customerName || null,
+      status: "nuevo",
+      priority: "normal",
+      product: order.product || null,
+      quantity: parseInt(order.quantity, 10) || null,
+      color: order.color || null,
+      scent: order.scent || null,
+      personal_message: order.personalMessage || null,
+      delivery_address: order.address || null,
+      desired_delivery_date: parseDate(order.deliveryDate),
+      payment_method: order.paymentMethod || null,
+      summary: order.summary || null,
+      updated_at: now
+    });
+  } catch (error) {
+    console.error("Order persistence failed:", error.response?.data || error.message);
+  }
 }
 
 async function readDashboardData() {
