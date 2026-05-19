@@ -16,6 +16,7 @@ const config = {
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
   telegramChatId: process.env.TELEGRAM_CHAT_ID,
+  maxConversationTurns: Number(process.env.MAX_CONVERSATION_TURNS || 8),
   fallbackReply:
     process.env.FALLBACK_REPLY ||
     "Estamos revisando tu mensaje y en un momento te ayudamos con mucho gusto."
@@ -88,7 +89,16 @@ app.get("/api/dashboard", async (req, res) => {
     return;
   }
 
-  res.json(await readDashboardData());
+  try {
+    res.json(await readDashboardData());
+  } catch (error) {
+    console.error("Dashboard read failed:", error.response?.data || error.message);
+    res.status(500).json({
+      orders: [],
+      conversations: [],
+      error: "dashboard_unavailable"
+    });
+  }
 });
 
 app.get("/webhook", (req, res) => {
@@ -113,12 +123,13 @@ app.post("/webhook", async (req, res) => {
     processedMessageIds.add(message.id);
 
     console.log("Mensaje recibido:", message.from, message.text);
-    const reply = await buildReply(message);
+    const history = await getRecentConversation(message.from);
+    const reply = await buildReply(message, history);
 
     try {
       await sendWhatsAppText(message.from, reply);
       await appendConversation({ ...message, reply });
-      await captureConfirmedOrder(message, reply);
+      await captureConfirmedOrder(message, reply, history);
       console.log(`Respuesta enviada a ${message.from}`);
     } catch (error) {
       console.error("No se pudo procesar el mensaje:", error.response?.data || error.message);
@@ -154,12 +165,13 @@ function extractMessages(payload = {}) {
   return messages;
 }
 
-async function buildReply(message) {
+async function buildReply(message, history = []) {
   try {
     const completion = await openai.chat.completions.create({
       model: config.openaiModel,
       messages: [
         { role: "system", content: buildSystemPrompt() },
+        ...historyToOpenAiMessages(history),
         {
           role: "user",
           content: message.name
@@ -195,6 +207,9 @@ Reglas:
 - No inventes precios, stock, promociones, metodos de pago ni fechas.
 - Cosmik trabaja on-demand, no con stock fijo.
 - Si falta informacion, haz una sola pregunta concreta a la vez.
+- Usa el historial de conversacion para continuar el proceso; no vuelvas a saludar ni a empezar desde cero si el cliente ya esta avanzando un pedido.
+- Si el cliente responde algo corto como "si", "confirmo", un telefono, una direccion, un color o un aroma, interpretalo segun la ultima pregunta del asistente.
+- Si ya hay un pedido en curso, conserva los datos ya dados y pide solamente el dato faltante mas importante.
 - Antes de cerrar, resume el pedido y pregunta si confirma.
 - Si el cliente confirma, responde breve y avisa que el equipo revisara el pedido.
 - Mantén respuestas cortas para WhatsApp.
@@ -224,8 +239,8 @@ async function sendWhatsAppText(to, text) {
   );
 }
 
-async function captureConfirmedOrder(message, reply) {
-  const analysis = await analyzeOrder(message, reply);
+async function captureConfirmedOrder(message, reply, history = []) {
+  const analysis = await analyzeOrder(message, reply, history);
   if (!analysis?.confirmed) return;
 
   const order = {
@@ -240,7 +255,7 @@ async function captureConfirmedOrder(message, reply) {
   await notifyTelegram(order);
 }
 
-async function analyzeOrder(message, reply) {
+async function analyzeOrder(message, reply, history = []) {
   try {
     const completion = await openai.chat.completions.create({
       model: config.openaiModel,
@@ -258,7 +273,11 @@ async function analyzeOrder(message, reply) {
         },
         {
           role: "user",
-          content: JSON.stringify({ customer: message, assistantReply: reply })
+          content: JSON.stringify({
+            recentConversation: history,
+            customer: message,
+            assistantReply: reply
+          })
         }
       ],
       max_completion_tokens: 450
@@ -269,6 +288,37 @@ async function analyzeOrder(message, reply) {
     console.error("Order analysis failed:", error.response?.data || error.message);
     return null;
   }
+}
+
+async function getRecentConversation(customerWhatsapp) {
+  if (!supabaseEnabled()) return [];
+
+  try {
+    const rows = await supabaseGet("conversations", {
+      select: "incoming_text,assistant_reply,created_at",
+      customer_whatsapp: `eq.${customerWhatsapp}`,
+      order: "created_at.desc",
+      limit: String(config.maxConversationTurns)
+    });
+
+    return rows.reverse();
+  } catch (error) {
+    console.error("Conversation history read failed:", error.response?.data || error.message);
+    return [];
+  }
+}
+
+function historyToOpenAiMessages(history) {
+  return history.flatMap((turn) => {
+    const messages = [];
+    if (turn.incoming_text) {
+      messages.push({ role: "user", content: turn.incoming_text });
+    }
+    if (turn.assistant_reply) {
+      messages.push({ role: "assistant", content: turn.assistant_reply });
+    }
+    return messages;
+  });
 }
 
 async function appendConversation(event) {
