@@ -1,6 +1,7 @@
 import express from "express";
 import axios from "axios";
 import OpenAI from "openai";
+import { readFile } from "node:fs/promises";
 
 const config = {
   port: Number(process.env.PORT || 10000),
@@ -86,6 +87,19 @@ app.get("/health", (_req, res) => {
 
 app.get("/privacy", (_req, res) => {
   res.type("html").send("<h1>Cosmik Privacy Policy</h1><p>Cosmik usa WhatsApp para atender solicitudes, responder consultas y gestionar pedidos. Los datos compartidos por clientes se usan solo para la atencion comercial y operativa.</p>");
+});
+
+app.get("/catalog.csv", async (_req, res) => {
+  try {
+    const csv = await readFile(new URL("./templates/whatsapp-catalog-meta-feed.csv", import.meta.url), "utf8");
+    res
+      .setHeader("Cache-Control", "public, max-age=300")
+      .type("text/csv")
+      .send(csv);
+  } catch (error) {
+    console.error("Catalog feed read failed:", error.message);
+    res.status(500).type("text").send("catalog_unavailable");
+  }
 });
 
 app.get("/api/dashboard", async (req, res) => {
