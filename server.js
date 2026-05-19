@@ -102,6 +102,19 @@ app.get("/catalog.csv", async (_req, res) => {
   }
 });
 
+app.get("/catalog.tsv", async (_req, res) => {
+  try {
+    const tsv = await readFile(new URL("./templates/whatsapp-catalog-meta-feed.tsv", import.meta.url), "utf8");
+    res
+      .setHeader("Cache-Control", "public, max-age=300")
+      .type("text/tab-separated-values")
+      .send(tsv);
+  } catch (error) {
+    console.error("Catalog TSV feed read failed:", error.message);
+    res.status(500).type("text").send("catalog_unavailable");
+  }
+});
+
 app.get("/api/dashboard", async (req, res) => {
   if (!isAuthorizedAdmin(req)) {
     res.sendStatus(401);
