@@ -16,7 +16,6 @@ const config = {
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
   telegramChatId: process.env.TELEGRAM_CHAT_ID,
-  paymentLinkUrl: process.env.PAYMENT_LINK_URL || "https://www.wearecosmik.com/",
   maxConversationTurns: Number(process.env.MAX_CONVERSATION_TURNS || 8),
   fallbackReply:
     process.env.FALLBACK_REPLY ||
@@ -210,6 +209,7 @@ Objetivo:
 Reglas:
 - No inventes precios, stock, promociones, metodos de pago ni fechas.
 - Cosmik trabaja on-demand, no con stock fijo.
+- Si el producto es un bouquet, pregunta que tipo de flores o estilo quiere antes de cerrar. Mientras el catalogo de flores no este confirmado, no inventes flores disponibles; pregunta su preferencia y di que el equipo confirma disponibilidad.
 - Si falta informacion, haz una sola pregunta concreta a la vez.
 - Si el historial esta vacio, empieza siempre con un saludo corto y natural antes de responder la solicitud del cliente.
 - Usa el historial de conversacion para continuar el proceso; no vuelvas a saludar ni a empezar desde cero si el cliente ya esta avanzando un pedido.
@@ -219,7 +219,7 @@ Reglas:
 - Usa saludos neutrales como "Hola", "Perfecto", "Súper", "Listo" o "Qué lindo".
 - Solo usa un nombre si el cliente lo escribe explicitamente como su nombre o como el nombre de la persona que recibe el pedido.
 - Para envio, explica cuando sea relevante: recogida coordinada en Engativa Gran Granada; envio a Bogota $15.000 COP; envio a Colombia $20.000 COP; envio gratis desde $250.000 COP.
-- Si el cliente elige pago con tarjeta, link de pago o pago online, despues de que confirme el pedido indicale que puede finalizar con el link de pago.
+- Si el cliente elige pago con tarjeta, link de pago o pago online, despues de que confirme el pedido indicale que el equipo enviara un link de pago personalizado con el valor exacto. No envies links genericos ni el link de la pagina web para finalizar.
 - Antes de cerrar, resume el pedido y pregunta si confirma.
 - Si el cliente confirma, responde breve y avisa que el equipo revisara el pedido.
 - Mantén respuestas cortas para WhatsApp.
@@ -265,7 +265,7 @@ async function captureConfirmedOrder(message, reply, history = []) {
   await notifyTelegram(order);
 
   if (requiresPaymentLink(order.paymentMethod)) {
-    await sendPaymentLink(message.from);
+    await sendCardPaymentHoldMessage(message.from);
   }
 }
 
@@ -280,7 +280,9 @@ async function analyzeOrder(message, reply, history = []) {
           content: [
             "Analiza si el cliente acaba de confirmar un pedido de Cosmik.",
             "Devuelve solo JSON valido.",
-            "Campos: confirmed boolean, product, quantity, color, scent, customerName, phone, address, deliveryDate, paymentMethod, personalMessage, summary.",
+            "Campos: confirmed boolean, product, quantity, color, scent, customerName, phone, address, deliveryDate, deliveryDateIso, paymentMethod, personalMessage, summary.",
+            "deliveryDate debe conservar la forma natural que dijo el cliente.",
+            "deliveryDateIso debe ser YYYY-MM-DD si puedes inferir una fecha exacta usando la fecha actual de Bogota; si no puedes, string vacio.",
             "Si no hay confirmacion clara del pedido, confirmed debe ser false.",
             "No inventes campos faltantes; usa strings vacios."
           ].join(" ")
@@ -288,6 +290,7 @@ async function analyzeOrder(message, reply, history = []) {
         {
           role: "user",
           content: JSON.stringify({
+            currentDateBogota: getBogotaDateString(),
             recentConversation: history,
             customer: message,
             assistantReply: reply
@@ -405,8 +408,9 @@ async function appendOrder(order) {
       scent: order.scent || null,
       personal_message: order.personalMessage || null,
       delivery_address: order.address || null,
-      desired_delivery_date: parseDate(order.deliveryDate),
+      desired_delivery_date: parseDate(order.deliveryDateIso || order.deliveryDate),
       payment_method: order.paymentMethod || null,
+      estimated_value_cop: estimateOrderValue(order),
       summary: order.summary || null,
       updated_at: now
     });
@@ -471,7 +475,10 @@ function supabaseEnabled() {
 async function notifyTelegram(order) {
   if (!config.telegramBotToken || !config.telegramChatId) return;
 
+  const needsPaymentLink = requiresPaymentLink(order.paymentMethod);
+  const estimatedValue = estimateOrderValue(order);
   const text = [
+    needsPaymentLink ? "URGENTE: generar link de pago personalizado" : null,
     "Nuevo pedido Cosmik",
     `Cliente: ${order.customerName || "Por confirmar"}`,
     `Telefono: ${order.phone || order.from || "Por confirmar"}`,
@@ -480,11 +487,15 @@ async function notifyTelegram(order) {
     `Color: ${order.color || "Por confirmar"}`,
     `Aroma: ${order.scent || "Por confirmar"}`,
     `Direccion: ${order.address || "Por confirmar"}`,
-    `Fecha: ${order.deliveryDate || "Por confirmar"}`,
+    `Fecha: ${order.deliveryDate || order.deliveryDateIso || "Por confirmar"}`,
     `Pago: ${order.paymentMethod || "Por confirmar"}`,
+    `Valor estimado: ${estimatedValue ? `$${estimatedValue.toLocaleString("es-CO")} COP` : "Por confirmar"}`,
     `Mensaje: ${order.personalMessage || "No aplica"}`,
-    `Resumen: ${order.summary || "Sin resumen"}`
-  ].join("\n");
+    `Resumen: ${order.summary || "Sin resumen"}`,
+    needsPaymentLink
+      ? "Accion: enviar link de pago con el valor exacto de la orden. No se envio link automatico al cliente."
+      : null
+  ].filter(Boolean).join("\n");
 
   try {
     await axios.post(`https://api.telegram.org/bot${config.telegramBotToken}/sendMessage`, {
@@ -497,10 +508,10 @@ async function notifyTelegram(order) {
   }
 }
 
-async function sendPaymentLink(to) {
+async function sendCardPaymentHoldMessage(to) {
   await sendWhatsAppText(
     to,
-    `Para finalizar tu pedido, puedes continuar por aqui: ${config.paymentLinkUrl}`
+    "Perfecto. Para pago con tarjeta, el equipo te enviara un link de pago personalizado con el valor exacto de tu pedido."
   );
 }
 
@@ -522,6 +533,35 @@ function requiresPaymentLink(paymentMethod = "") {
   );
 }
 
+function estimateOrderValue(order) {
+  const product = findProduct(order.product);
+  const quantity = parseInt(order.quantity, 10) || 1;
+  if (!product?.price_cop) return null;
+  return product.price_cop * quantity;
+}
+
+function findProduct(productName = "") {
+  const normalizedName = normalizeText(productName);
+  if (!normalizedName) return null;
+
+  return knowledgeBase.products.find((product) => {
+    const normalizedProduct = normalizeText(product.name);
+    return (
+      normalizedName.includes(normalizedProduct) ||
+      normalizedProduct.includes(normalizedName)
+    );
+  });
+}
+
+function normalizeText(value = "") {
+  return value
+    .toString()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
 async function subscribeWaba() {
   if (!config.whatsappToken || !config.wabaId) return;
 
@@ -539,9 +579,129 @@ async function subscribeWaba() {
 
 function parseDate(value) {
   if (!value) return null;
+
+  const rawValue = value.toString().trim();
+  const isoMatch = rawValue.match(/\b(20\d{2})-(\d{2})-(\d{2})\b/);
+  if (isoMatch) return isoMatch[0];
+
+  const numericMatch = rawValue.match(/\b(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\b/);
+  if (numericMatch) {
+    const day = Number(numericMatch[1]);
+    const month = Number(numericMatch[2]);
+    const year = numericMatch[3]
+      ? normalizeYear(Number(numericMatch[3]))
+      : Number(getBogotaDateString().slice(0, 4));
+    return datePartsToIso(year, month, day);
+  }
+
+  const spanishDate = parseSpanishDate(rawValue);
+  if (spanishDate) return spanishDate;
+
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return null;
   return parsed.toISOString().slice(0, 10);
+}
+
+function parseSpanishDate(value) {
+  const normalized = normalizeText(value);
+  const dayMatch = normalized.match(/\b(\d{1,2})\b/);
+  if (!dayMatch) return null;
+
+  const requestedDay = Number(dayMatch[1]);
+  const today = getBogotaDateParts();
+  const requestedMonth = monthFromText(normalized);
+  const requestedWeekday = weekdayFromText(normalized);
+
+  if (requestedMonth) {
+    const iso = datePartsToIso(today.year, requestedMonth, requestedDay);
+    if (iso && iso >= getBogotaDateString()) return iso;
+    return datePartsToIso(today.year + 1, requestedMonth, requestedDay);
+  }
+
+  for (let offset = 0; offset < 370; offset += 1) {
+    const candidate = addDays(today.date, offset);
+    if (candidate.getUTCDate() !== requestedDay) continue;
+    if (requestedWeekday !== null && candidate.getUTCDay() !== requestedWeekday) continue;
+    return candidate.toISOString().slice(0, 10);
+  }
+
+  return null;
+}
+
+function getBogotaDateString() {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Bogota",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  });
+  return formatter.format(new Date());
+}
+
+function getBogotaDateParts() {
+  const [year, month, day] = getBogotaDateString().split("-").map(Number);
+  return {
+    year,
+    month,
+    day,
+    date: new Date(Date.UTC(year, month - 1, day))
+  };
+}
+
+function addDays(date, days) {
+  const next = new Date(date);
+  next.setUTCDate(next.getUTCDate() + days);
+  return next;
+}
+
+function normalizeYear(year) {
+  return year < 100 ? 2000 + year : year;
+}
+
+function datePartsToIso(year, month, day) {
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return date.toISOString().slice(0, 10);
+}
+
+function monthFromText(value) {
+  const months = {
+    enero: 1,
+    febrero: 2,
+    marzo: 3,
+    abril: 4,
+    mayo: 5,
+    junio: 6,
+    julio: 7,
+    agosto: 8,
+    septiembre: 9,
+    setiembre: 9,
+    octubre: 10,
+    noviembre: 11,
+    diciembre: 12
+  };
+
+  return Object.entries(months).find(([month]) => value.includes(month))?.[1] || null;
+}
+
+function weekdayFromText(value) {
+  const weekdays = {
+    domingo: 0,
+    lunes: 1,
+    martes: 2,
+    miercoles: 3,
+    jueves: 4,
+    viernes: 5,
+    sabado: 6
+  };
+
+  return Object.entries(weekdays).find(([weekday]) => value.includes(weekday))?.[1] ?? null;
 }
 
 subscribeWaba();
