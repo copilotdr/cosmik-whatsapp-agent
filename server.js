@@ -16,6 +16,7 @@ const config = {
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
   telegramChatId: process.env.TELEGRAM_CHAT_ID,
+  paymentLinkUrl: process.env.PAYMENT_LINK_URL || "",
   maxConversationTurns: Number(process.env.MAX_CONVERSATION_TURNS || 8),
   fallbackReply:
     process.env.FALLBACK_REPLY ||
@@ -40,8 +41,12 @@ const knowledgeBase = {
     country: "Colombia",
     production_time:
       "Pedidos personalizados normalmente en 2 a 3 dias habiles. Confirmar disponibilidad antes de prometer fecha.",
+    pickup:
+      "Tenemos punto/tienda de recogida en Engativa, sector Gran Granada. La recogida se coordina directamente con el equipo.",
+    bogota_fee_cop: 15000,
+    colombia_fee_cop: 20000,
     free_shipping:
-      "La web menciona envio gratis desde compras mayores a $200.000; confirmar si aplica antes de cerrar."
+      "Envio gratis en compras desde $250.000 COP."
   },
   personalization: ["color", "mensaje", "flor", "olor", "acabado", "etiqueta"],
   products: [
@@ -206,12 +211,15 @@ Reglas:
 - No inventes precios, stock, promociones, metodos de pago ni fechas.
 - Cosmik trabaja on-demand, no con stock fijo.
 - Si falta informacion, haz una sola pregunta concreta a la vez.
+- Si el historial esta vacio, empieza siempre con un saludo corto y natural antes de responder la solicitud del cliente.
 - Usa el historial de conversacion para continuar el proceso; no vuelvas a saludar ni a empezar desde cero si el cliente ya esta avanzando un pedido.
 - Si el cliente responde algo corto como "si", "confirmo", un telefono, una direccion, un color o un aroma, interpretalo segun la ultima pregunta del asistente.
 - Si ya hay un pedido en curso, conserva los datos ya dados y pide solamente el dato faltante mas importante.
 - No uses el nombre del perfil de WhatsApp para saludar o dirigirte a la persona, porque puede sentirse invasivo.
 - Usa saludos neutrales como "Hola", "Perfecto", "Súper", "Listo" o "Qué lindo".
 - Solo usa un nombre si el cliente lo escribe explicitamente como su nombre o como el nombre de la persona que recibe el pedido.
+- Para envio, explica cuando sea relevante: recogida coordinada en Engativa Gran Granada; envio a Bogota $15.000 COP; envio a Colombia $20.000 COP; envio gratis desde $250.000 COP.
+- Si el cliente elige pago con tarjeta, link de pago o pago online, despues de que confirme el pedido indicale que puede finalizar con el link de pago.
 - Antes de cerrar, resume el pedido y pregunta si confirma.
 - Si el cliente confirma, responde breve y avisa que el equipo revisara el pedido.
 - Mantén respuestas cortas para WhatsApp.
@@ -255,6 +263,10 @@ async function captureConfirmedOrder(message, reply, history = []) {
 
   await appendOrder(order);
   await notifyTelegram(order);
+
+  if (requiresPaymentLink(order.paymentMethod)) {
+    await sendPaymentLink(message.from);
+  }
 }
 
 async function analyzeOrder(message, reply, history = []) {
@@ -474,10 +486,49 @@ async function notifyTelegram(order) {
     `Resumen: ${order.summary || "Sin resumen"}`
   ].join("\n");
 
-  await axios.post(`https://api.telegram.org/bot${config.telegramBotToken}/sendMessage`, {
-    chat_id: config.telegramChatId,
-    text
-  });
+  try {
+    await axios.post(`https://api.telegram.org/bot${config.telegramBotToken}/sendMessage`, {
+      chat_id: config.telegramChatId,
+      text
+    });
+    console.log("Telegram order notification sent:", order.id || order.from);
+  } catch (error) {
+    console.error("Telegram notification failed:", error.response?.data || error.message);
+  }
+}
+
+async function sendPaymentLink(to) {
+  if (!config.paymentLinkUrl) {
+    console.warn("PAYMENT_LINK_URL is missing; card payment link was not sent.");
+    await sendWhatsAppText(
+      to,
+      "Perfecto. Te compartimos el link de pago en un momento para finalizar tu pedido."
+    );
+    return;
+  }
+
+  await sendWhatsAppText(
+    to,
+    `Para finalizar tu pedido, puedes pagar por aqui: ${config.paymentLinkUrl}`
+  );
+}
+
+function requiresPaymentLink(paymentMethod = "") {
+  const normalized = paymentMethod
+    .toString()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+
+  return (
+    normalized.includes("tarjeta") ||
+    normalized.includes("link") ||
+    normalized.includes("online") ||
+    normalized.includes("pse") ||
+    normalized.includes("wompi") ||
+    normalized.includes("mercado pago") ||
+    normalized.includes("mercadopago")
+  );
 }
 
 async function subscribeWaba() {
