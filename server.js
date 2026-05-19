@@ -16,7 +16,7 @@ const config = {
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
   telegramChatId: process.env.TELEGRAM_CHAT_ID,
-  paymentLinkUrl: process.env.PAYMENT_LINK_URL || "",
+  paymentLinkUrl: process.env.PAYMENT_LINK_URL || "https://www.wearecosmik.com/",
   maxConversationTurns: Number(process.env.MAX_CONVERSATION_TURNS || 8),
   fallbackReply:
     process.env.FALLBACK_REPLY ||
@@ -498,18 +498,9 @@ async function notifyTelegram(order) {
 }
 
 async function sendPaymentLink(to) {
-  if (!config.paymentLinkUrl) {
-    console.warn("PAYMENT_LINK_URL is missing; card payment link was not sent.");
-    await sendWhatsAppText(
-      to,
-      "Perfecto. Te compartimos el link de pago en un momento para finalizar tu pedido."
-    );
-    return;
-  }
-
   await sendWhatsAppText(
     to,
-    `Para finalizar tu pedido, puedes pagar por aqui: ${config.paymentLinkUrl}`
+    `Para finalizar tu pedido, puedes continuar por aqui: ${config.paymentLinkUrl}`
   );
 }
 
