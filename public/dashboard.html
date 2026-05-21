@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cosmik Dashboard</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+        background: #f7f3ef;
+        color: #271f1b;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+      }
+
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 22px clamp(16px, 4vw, 48px);
+        border-bottom: 1px solid #e2d8cf;
+        background: #fffaf4;
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin: 0;
+      }
+
+      h1 {
+        font-size: clamp(24px, 3vw, 34px);
+      }
+
+      main {
+        display: grid;
+        gap: 22px;
+        padding: 22px clamp(16px, 4vw, 48px);
+      }
+
+      .toolbar,
+      .actions,
+      .stats {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+      }
+
+      input,
+      select,
+      button,
+      textarea {
+        min-height: 38px;
+        border-radius: 6px;
+        border: 1px solid #cdbfb4;
+        font: inherit;
+      }
+
+      input,
+      select,
+      textarea {
+        padding: 0 10px;
+        background: #fff;
+        color: #271f1b;
+      }
+
+      textarea {
+        width: 100%;
+        min-height: 78px;
+        padding: 10px;
+        resize: vertical;
+      }
+
+      button {
+        padding: 0 14px;
+        background: #271f1b;
+        color: #fff;
+        cursor: pointer;
+      }
+
+      button.secondary {
+        background: #fff;
+        color: #271f1b;
+      }
+
+      button.warn {
+        background: #9d3f33;
+      }
+
+      section {
+        min-width: 0;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.2fr) minmax(340px, 0.8fr);
+        gap: 20px;
+      }
+
+      .list {
+        display: grid;
+        gap: 12px;
+        margin-top: 14px;
+      }
+
+      article,
+      .stat {
+        border: 1px solid #e2d8cf;
+        border-radius: 8px;
+        background: #fff;
+        padding: 14px;
+      }
+
+      .order {
+        border-left: 5px solid #b7aa9d;
+      }
+
+      .order.needs-payment,
+      .order.alta {
+        border-left-color: #9d3f33;
+      }
+
+      .order.confirmado {
+        border-left-color: #2d6b4f;
+      }
+
+      .order.entregado {
+        opacity: 0.7;
+      }
+
+      .muted {
+        color: #756a62;
+        font-size: 13px;
+      }
+
+      .text {
+        white-space: pre-wrap;
+        margin-top: 8px;
+        line-height: 1.45;
+      }
+
+      .pair {
+        display: grid;
+        grid-template-columns: 130px minmax(0, 1fr);
+        gap: 6px;
+        margin-top: 6px;
+        font-size: 14px;
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        min-height: 24px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: #f0e7de;
+        color: #271f1b;
+        font-size: 12px;
+      }
+
+      .badge.hot {
+        background: #f4d3cd;
+        color: #6b2219;
+      }
+
+      .split {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin-top: 10px;
+      }
+
+      @media (max-width: 900px) {
+        header {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+
+        .grid,
+        .split {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>Cosmik Dashboard</h1>
+        <p class="muted">Pedidos, conversaciones y control manual del agente</p>
+      </div>
+      <div class="toolbar">
+        <input id="apiUrl" aria-label="API URL" placeholder="https://cosmik-whatsapp-agent.onrender.com" />
+        <input id="token" aria-label="Dashboard token" placeholder="Dashboard token" />
+        <button id="refresh" type="button">Actualizar</button>
+      </div>
+    </header>
+
+    <main>
+      <section>
+        <div class="stats" id="stats"></div>
+      </section>
+
+      <section class="grid">
+        <div>
+          <h2>Pedidos prioritarios</h2>
+          <p class="muted">Primero pagos pendientes, confirmados y entregas próximas.</p>
+          <div id="orders" class="list"></div>
+        </div>
+
+        <aside>
+          <h2>Control manual</h2>
+          <article>
+            <p class="muted">Pausa o reactiva el bot para un cliente específico.</p>
+            <div class="split">
+              <input id="manualWhatsapp" placeholder="WhatsApp del cliente" />
+              <input id="manualNote" placeholder="Nota interna" />
+            </div>
+            <div class="actions" style="margin-top: 10px">
+              <button id="pauseBot" type="button" class="warn">Pausar bot</button>
+              <button id="resumeBot" type="button" class="secondary">Reactivar bot</button>
+            </div>
+          </article>
+          <div id="manualOverrides" class="list"></div>
+        </aside>
+      </section>
+
+      <section>
+        <h2>Conversaciones recientes</h2>
+        <div id="conversations" class="list"></div>
+      </section>
+    </main>
+
+    <script>
+      const apiUrlInput = document.querySelector("#apiUrl");
+      const tokenInput = document.querySelector("#token");
+      const ordersEl = document.querySelector("#orders");
+      const conversationsEl = document.querySelector("#conversations");
+      const statsEl = document.querySelector("#stats");
+      const manualOverridesEl = document.querySelector("#manualOverrides");
+
+      apiUrlInput.value =
+        localStorage.getItem("cosmikApiUrl") ||
+        "https://cosmik-whatsapp-agent.onrender.com";
+      tokenInput.value = localStorage.getItem("cosmikDashboardToken") || "";
+
+      document.querySelector("#refresh").addEventListener("click", loadDashboard);
+      document.querySelector("#pauseBot").addEventListener("click", () => setManual(true));
+      document.querySelector("#resumeBot").addEventListener("click", () => setManual(false));
+
+      async function loadDashboard() {
+        const apiUrl = getApiUrl();
+        const token = getToken();
+        localStorage.setItem("cosmikApiUrl", apiUrl);
+        localStorage.setItem("cosmikDashboardToken", token);
+
+        ordersEl.innerHTML = "<p class='muted'>Cargando...</p>";
+        conversationsEl.innerHTML = "<p class='muted'>Cargando...</p>";
+
+        try {
+          const [dashboard, overrides] = await Promise.all([
+            fetchJson(`${apiUrl}/api/dashboard?token=${encodeURIComponent(token)}`),
+            fetchJson(`${apiUrl}/api/manual-overrides?token=${encodeURIComponent(token)}`)
+          ]);
+          renderStats(dashboard.orders || []);
+          renderOrders(dashboard.orders || []);
+          renderConversations(dashboard.conversations || []);
+          renderManualOverrides(overrides || []);
+        } catch (error) {
+          ordersEl.innerHTML = `<p class="muted">No se pudo cargar: ${escapeHtml(error.message)}</p>`;
+          conversationsEl.innerHTML = "";
+        }
+      }
+
+      async function setManual(active) {
+        const whatsapp = document.querySelector("#manualWhatsapp").value.trim();
+        const note = document.querySelector("#manualNote").value.trim();
+        if (!whatsapp) return;
+
+        await fetchJson(`${getApiUrl()}/api/manual-overrides?token=${encodeURIComponent(getToken())}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ whatsapp, note, active })
+        });
+        await loadDashboard();
+      }
+
+      async function updateOrder(orderId, payload) {
+        await fetchJson(`${getApiUrl()}/api/orders/${encodeURIComponent(orderId)}?token=${encodeURIComponent(getToken())}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        await loadDashboard();
+      }
+
+      function renderStats(orders) {
+        const pendingPayment = orders.filter((order) => needsPaymentLink(order.paymentMethod || order.payment_method)).length;
+        const confirmed = orders.filter((order) => ["nuevo", "confirmado"].includes(order.status)).length;
+        const upcoming = orders.filter(isUpcoming).length;
+
+        statsEl.innerHTML = [
+          stat("Pagos por link", pendingPayment),
+          stat("Pedidos activos", confirmed),
+          stat("Próximos a entregar", upcoming),
+          stat("Total pedidos", orders.length)
+        ].join("");
+      }
+
+      function renderOrders(orders) {
+        const sorted = [...orders].sort(compareOrders);
+        ordersEl.innerHTML = sorted.length
+          ? sorted.map(renderOrder).join("")
+          : "<p class='muted'>Todavía no hay pedidos capturados.</p>";
+      }
+
+      function renderOrder(order) {
+        const paymentMethod = order.paymentMethod || order.payment_method || "";
+        const status = order.status || "nuevo";
+        const hot = needsPaymentLink(paymentMethod);
+        const delivery = order.deliveryDate || order.desired_delivery_date || "";
+        const priorityClass = hot ? "needs-payment" : order.priority || "";
+
+        return `
+          <article class="order ${escapeHtml(priorityClass)} ${escapeHtml(status)}">
+            <div class="actions">
+              <strong>${escapeHtml(order.product || "Pedido por completar")}</strong>
+              <span class="badge ${hot ? "hot" : ""}">${escapeHtml(status)}</span>
+              ${hot ? "<span class='badge hot'>link de pago</span>" : ""}
+              ${delivery ? `<span class="badge">${escapeHtml(delivery)}</span>` : ""}
+            </div>
+            ${pair("Cliente", order.customerName || order.customer_name || "Por confirmar")}
+            ${pair("WhatsApp", order.from || order.customer_whatsapp || "Por confirmar")}
+            ${pair("Cantidad", order.quantity || "Por confirmar")}
+            ${pair("Color", order.color || "Por confirmar")}
+            ${pair("Aroma", order.scent || "Por confirmar")}
+            ${pair("Dirección", order.address || order.delivery_address || "Por confirmar")}
+            ${pair("Pago", paymentMethod || "Por confirmar")}
+            ${pair("Valor", money(order.estimatedValueCop || order.estimated_value_cop))}
+            ${order.personalMessage || order.personal_message ? pair("Mensaje", order.personalMessage || order.personal_message) : ""}
+            <p class="text">${escapeHtml(order.summary || "")}</p>
+            <div class="actions" style="margin-top: 10px">
+              <select data-order-status="${escapeHtml(order.id)}">
+                ${["nuevo", "confirmado", "pago_pendiente", "pagado", "en_preparacion", "entregado", "cancelado"]
+                  .map((item) => `<option value="${item}" ${item === status ? "selected" : ""}>${item}</option>`)
+                  .join("")}
+              </select>
+              <button type="button" onclick="saveStatus('${escapeJs(order.id)}')">Guardar estado</button>
+              <button type="button" class="secondary" onclick="prefillManual('${escapeJs(order.from || order.customer_whatsapp || "")}')">Tomar manual</button>
+            </div>
+          </article>
+        `;
+      }
+
+      function renderConversations(conversations) {
+        conversationsEl.innerHTML = conversations.length
+          ? conversations.slice(0, 80).map((item) => `
+              <article>
+                <div class="actions">
+                  <strong>${escapeHtml(item.name || item.from || "Cliente")}</strong>
+                  <button class="secondary" type="button" onclick="prefillManual('${escapeJs(item.from || item.customer_whatsapp || "")}')">Tomar manual</button>
+                </div>
+                <p class="muted">${escapeHtml(formatDateTime(item.createdAt || item.created_at || ""))}</p>
+                <p class="text"><b>Cliente:</b> ${escapeHtml(item.text || item.incoming_text || "")}</p>
+                <p class="text"><b>Agente:</b> ${escapeHtml(item.reply || item.assistant_reply || "")}</p>
+              </article>
+            `).join("")
+          : "<p class='muted'>Todavía no hay conversaciones guardadas.</p>";
+      }
+
+      function renderManualOverrides(overrides) {
+        const active = overrides.filter((item) => item.active);
+        manualOverridesEl.innerHTML = active.length
+          ? active.map((item) => `
+              <article>
+                <strong>${escapeHtml(item.customer_whatsapp)}</strong>
+                <p class="muted">${escapeHtml(item.note || "Modo manual activo")}</p>
+                <button type="button" class="secondary" onclick="quickResume('${escapeJs(item.customer_whatsapp)}')">Reactivar</button>
+              </article>
+            `).join("")
+          : "<p class='muted'>No hay clientes pausados.</p>";
+      }
+
+      window.saveStatus = async (orderId) => {
+        const select = document.querySelector(`[data-order-status="${CSS.escape(orderId)}"]`);
+        if (!select) return;
+        await updateOrder(orderId, { status: select.value });
+      };
+
+      window.prefillManual = (whatsapp) => {
+        document.querySelector("#manualWhatsapp").value = whatsapp || "";
+        document.querySelector("#manualNote").value = "Atención manual desde dashboard";
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      };
+
+      window.quickResume = async (whatsapp) => {
+        document.querySelector("#manualWhatsapp").value = whatsapp;
+        await setManual(false);
+      };
+
+      function compareOrders(a, b) {
+        return scoreOrder(b) - scoreOrder(a);
+      }
+
+      function scoreOrder(order) {
+        let score = 0;
+        if (needsPaymentLink(order.paymentMethod || order.payment_method)) score += 1000;
+        if (["nuevo", "confirmado", "pago_pendiente"].includes(order.status)) score += 500;
+        if (isUpcoming(order)) score += 250;
+        return score + new Date(order.createdAt || order.created_at || 0).getTime() / 100000000000;
+      }
+
+      function isUpcoming(order) {
+        const date = order.deliveryDate || order.desired_delivery_date;
+        if (!date) return false;
+        const today = new Date();
+        const delivery = new Date(`${date}T00:00:00`);
+        const days = (delivery - new Date(today.toDateString())) / 86400000;
+        return days >= 0 && days <= 7;
+      }
+
+      function needsPaymentLink(paymentMethod = "") {
+        return normalize(paymentMethod).match(/tarjeta|link|online|pse|wompi|mercado pago|mercadopago/);
+      }
+
+      function pair(label, value) {
+        return `<div class="pair"><span class="muted">${escapeHtml(label)}</span><span>${escapeHtml(value || "Por confirmar")}</span></div>`;
+      }
+
+      function stat(label, value) {
+        return `<div class="stat"><strong>${escapeHtml(value)}</strong><p class="muted">${escapeHtml(label)}</p></div>`;
+      }
+
+      function money(value) {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) && parsed > 0
+          ? `$${parsed.toLocaleString("es-CO")} COP`
+          : "Por confirmar";
+      }
+
+      function getApiUrl() {
+        return apiUrlInput.value.replace(/\/$/, "");
+      }
+
+      function getToken() {
+        return tokenInput.value.trim();
+      }
+
+      async function fetchJson(url, options) {
+        const response = await fetch(url, options);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      }
+
+      function formatDateTime(value) {
+        if (!value) return "";
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return value;
+        return date.toLocaleString("es-CO", { dateStyle: "medium", timeStyle: "short" });
+      }
+
+      function normalize(value = "") {
+        return value
+          .toString()
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .toLowerCase();
+      }
+
+      function escapeHtml(value) {
+        return String(value)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      function escapeJs(value) {
+        return String(value).replaceAll("\\", "\\\\").replaceAll("'", "\\'");
+      }
+
+      loadDashboard();
+    </script>
+  </body>
+</html>

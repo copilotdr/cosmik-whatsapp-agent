@@ -75,7 +75,21 @@ const knowledgeBase = {
   ]
 };
 
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PATCH,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
+
+  if (req.method === "OPTIONS") {
+    res.sendStatus(204);
+    return;
+  }
+
+  next();
+});
+
 app.use(express.json({ limit: "1mb" }));
+app.use(express.static("public"));
 
 app.get("/", (_req, res) => {
   res.type("text").send("Cosmik WhatsApp Agent is running.");
@@ -169,6 +183,34 @@ app.post("/api/manual-overrides", async (req, res) => {
   } catch (error) {
     console.error("Manual override update failed:", error.response?.data || error.message);
     res.status(500).json({ error: "manual_override_update_failed" });
+  }
+});
+
+app.patch("/api/orders/:id", async (req, res) => {
+  if (!isAuthorizedAdmin(req)) {
+    res.sendStatus(401);
+    return;
+  }
+
+  try {
+    const updated = await updateOrder(req.params.id, {
+      status: req.body?.status,
+      priority: req.body?.priority,
+      teamNotes: req.body?.teamNotes,
+      checkoutUrl: req.body?.checkoutUrl,
+      paymentMethod: req.body?.paymentMethod,
+      estimatedValueCop: req.body?.estimatedValueCop
+    });
+
+    if (!updated) {
+      res.status(404).json({ error: "order_not_found" });
+      return;
+    }
+
+    res.json(updated);
+  } catch (error) {
+    console.error("Order update failed:", error.response?.data || error.message);
+    res.status(500).json({ error: "order_update_failed" });
   }
 });
 
@@ -279,7 +321,7 @@ Responde en espanol con tono cercano, dulce, claro y comercial.
 Objetivo:
 - Ayudar al cliente a elegir segun ocasion, color, aroma, forma, tamano/formato y cantidad.
 - Recomendar maximo 3 opciones con precios solo si estan en la base.
-- Guiar al cliente hacia el checkout o hacia la confirmacion de pedido por WhatsApp.
+- Guiar al cliente hacia la confirmacion de pedido por WhatsApp, sin enviar un link generico de checkout.
 - Recopilar: producto, cantidad, color, aroma, nombre, telefono, direccion, fecha deseada, metodo de pago y mensaje personalizado si aplica.
 
 Reglas:
@@ -543,6 +585,37 @@ async function setManualOverride({ whatsapp, active, note }) {
 
   await supabaseUpsert("manual_overrides", row);
   return row;
+}
+
+async function updateOrder(orderId, updates = {}) {
+  if (!supabaseEnabled()) return null;
+
+  const now = new Date().toISOString();
+  const row = { updated_at: now };
+  const map = {
+    status: "status",
+    priority: "priority",
+    teamNotes: "team_notes",
+    checkoutUrl: "checkout_url",
+    paymentMethod: "payment_method",
+    estimatedValueCop: "estimated_value_cop"
+  };
+
+  for (const [key, column] of Object.entries(map)) {
+    if (Object.hasOwn(updates, key) && updates[key] !== undefined) {
+      row[column] = updates[key] || null;
+    }
+  }
+
+  await axios.patch(
+    `${config.supabaseUrl}/rest/v1/orders?id=eq.${encodeURIComponent(orderId)}`,
+    row,
+    {
+      headers: { ...supabaseHeaders(), Prefer: "return=representation" }
+    }
+  );
+
+  return { id: orderId, ...updates, updatedAt: now };
 }
 
 async function isManualOverrideActive(customerWhatsapp) {
