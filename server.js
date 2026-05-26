@@ -245,6 +245,33 @@ app.post("/api/manual-messages", async (req, res) => {
   }
 });
 
+app.post("/api/conversation-statuses", async (req, res) => {
+  if (!isAuthorizedAdmin(req)) {
+    res.sendStatus(401);
+    return;
+  }
+
+  const whatsapp = normalizeWhatsapp(req.body?.whatsapp);
+  const status = req.body?.status?.toString().trim() || "activo";
+
+  if (!whatsapp) {
+    res.status(400).json({ error: "whatsapp_required" });
+    return;
+  }
+
+  try {
+    const row = await setConversationStatus({
+      whatsapp,
+      status,
+      reason: req.body?.reason || null
+    });
+    res.json(row);
+  } catch (error) {
+    console.error("Conversation status update failed:", error.response?.data || error.message);
+    res.status(500).json({ error: "conversation_status_update_failed" });
+  }
+});
+
 app.post("/api/test-notification", async (req, res) => {
   if (!isAuthorizedAdmin(req)) {
     res.sendStatus(401);
@@ -552,6 +579,10 @@ function historyToOpenAiMessages(history) {
 }
 
 async function appendConversation(event) {
+  if (event.text) {
+    await reopenConversationIfNeeded(event.from);
+  }
+
   rememberConversation(event.from, {
     incoming_text: event.text,
     assistant_reply: event.reply,
@@ -626,10 +657,14 @@ async function appendOrder(order) {
 async function readDashboardData() {
   if (!supabaseEnabled()) return { orders: [], conversations: [] };
 
-  const [orders, conversations] = await Promise.all([
+  const [orders, conversations, conversationStatuses] = await Promise.all([
     supabaseGet("orders", { select: "*", order: "created_at.desc", limit: "250" }),
-    supabaseGet("conversations", { select: "*", order: "created_at.desc", limit: "250" })
+    supabaseGet("conversations", { select: "*", order: "created_at.desc", limit: "250" }),
+    supabaseGet("conversation_statuses", { select: "*", order: "updated_at.desc", limit: "500" })
   ]);
+  const statusByWhatsapp = new Map(
+    conversationStatuses.map((row) => [row.customer_whatsapp, row])
+  );
 
   return {
     orders: orders.map((row) => ({
@@ -645,7 +680,9 @@ async function readDashboardData() {
       name: row.customer_name,
       text: row.incoming_text,
       reply: row.assistant_reply,
-      createdAt: row.created_at
+      createdAt: row.created_at,
+      status: statusByWhatsapp.get(row.customer_whatsapp)?.status || "activo",
+      statusReason: statusByWhatsapp.get(row.customer_whatsapp)?.reason || ""
     }))
   };
 }
@@ -671,6 +708,44 @@ async function setManualOverride({ whatsapp, active, note }) {
 
   await supabaseUpsert("manual_overrides", row);
   return row;
+}
+
+async function setConversationStatus({ whatsapp, status, reason }) {
+  if (!supabaseEnabled()) return null;
+
+  const now = new Date().toISOString();
+  const row = {
+    customer_whatsapp: whatsapp,
+    status,
+    reason,
+    archived_at: status === "archivado" ? now : null,
+    updated_at: now
+  };
+
+  await supabaseUpsert("conversation_statuses", row);
+  return row;
+}
+
+async function reopenConversationIfNeeded(customerWhatsapp) {
+  if (!supabaseEnabled()) return;
+
+  try {
+    const rows = await supabaseGet("conversation_statuses", {
+      select: "status",
+      customer_whatsapp: `eq.${customerWhatsapp}`,
+      limit: "1"
+    });
+
+    if (rows[0]?.status === "archivado") {
+      await setConversationStatus({
+        whatsapp: customerWhatsapp,
+        status: "activo",
+        reason: "Reabierto por nuevo mensaje del cliente"
+      });
+    }
+  } catch (error) {
+    console.error("Conversation reopen check failed:", error.response?.data || error.message);
+  }
 }
 
 async function updateOrder(orderId, updates = {}) {
