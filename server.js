@@ -773,10 +773,10 @@ async function notifyIncomingMessage(message, mode = "auto") {
 
   const media = message.mediaId ? await downloadWhatsAppMedia(message) : null;
   const results = await Promise.allSettled([
-    sendTelegramText(text),
-    media ? sendTelegramMedia(message, text, media) : null,
-    sendAdminWhatsappText(text),
-    media ? sendAdminWhatsappMedia(message, text, media) : null
+    runNotificationChannel("telegram_text", () => sendTelegramText(text)),
+    media ? runNotificationChannel("telegram_media", () => sendTelegramMedia(message, text, media)) : null,
+    runNotificationChannel("admin_whatsapp_text", () => sendAdminWhatsappText(text)),
+    media ? runNotificationChannel("admin_whatsapp_media", () => sendAdminWhatsappMedia(message, text, media)) : null
   ]);
 
   logNotificationResults(results);
@@ -847,14 +847,14 @@ async function sendTelegramMedia(message, caption, media) {
 
   try {
     const file = new Blob([media.buffer], {
-      type: message.mimeType || "application/octet-stream"
+      type: media.mimeType || message.mimeType || "application/octet-stream"
     });
     const form = new FormData();
     const { endpoint, field } = telegramMediaTarget(message.type);
 
     form.append("chat_id", config.telegramChatId);
     form.append("caption", caption.slice(0, 1000));
-    form.append(field, file, message.filename || `cosmik-${message.type || "media"}`);
+    form.append(field, file, mediaFilename(message));
 
     const response = await fetch(`https://api.telegram.org/bot${config.telegramBotToken}/${endpoint}`, {
       method: "POST",
@@ -905,18 +905,24 @@ async function sendAdminWhatsappText(text) {
 async function sendAdminWhatsappMedia(message, caption, media) {
   if (!config.adminWhatsappNumber || !message.mediaId) return;
 
+  try {
+    await sendWhatsAppMedia(config.adminWhatsappNumber, message.mediaId, message, caption);
+    return;
+  } catch (error) {
+    console.error("Admin WhatsApp media reuse failed, trying upload:", error.response?.data || error.message);
+  }
+
   const uploadedMediaId = await uploadWhatsAppMedia(media, message);
   await sendWhatsAppMedia(config.adminWhatsappNumber, uploadedMediaId, message, caption);
 }
 
 async function uploadWhatsAppMedia(media, message) {
-  const file = new Blob([media.buffer], {
-    type: media.mimeType || message.mimeType || "application/octet-stream"
-  });
+  const mimeType = media.mimeType || message.mimeType || "application/octet-stream";
+  const file = new Blob([media.buffer], { type: mimeType });
   const form = new FormData();
   form.append("messaging_product", "whatsapp");
-  form.append("type", media.mimeType || message.mimeType || "application/octet-stream");
-  form.append("file", file, message.filename || `cosmik-${message.type || "media"}`);
+  form.append("type", mimeType);
+  form.append("file", file, mediaFilename(message));
 
   const response = await fetch(
     `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/media`,
@@ -966,6 +972,34 @@ function whatsappMediaType(type = "") {
   if (type === "video") return "video";
   if (type === "audio" || type === "voice") return "audio";
   return "document";
+}
+
+function mediaFilename(message) {
+  const current = message.filename || `cosmik-${message.type || "media"}`;
+  if (/\.[a-z0-9]{2,5}$/i.test(current)) return current;
+
+  return `${current}.${extensionForMedia(message)}`;
+}
+
+function extensionForMedia(message) {
+  const mimeType = (message.mimeType || "").toLowerCase();
+
+  if (mimeType.includes("jpeg")) return "jpg";
+  if (mimeType.includes("png")) return "png";
+  if (mimeType.includes("webp")) return "webp";
+  if (mimeType.includes("mp4")) return "mp4";
+  if (mimeType.includes("mpeg")) return "mp3";
+  if (mimeType.includes("ogg")) return "ogg";
+  if (mimeType.includes("pdf")) return "pdf";
+  if (message.type === "image") return "jpg";
+  if (message.type === "video") return "mp4";
+  if (message.type === "audio" || message.type === "voice") return "ogg";
+  return "bin";
+}
+
+async function runNotificationChannel(name, fn) {
+  await fn();
+  console.log(`Notification channel sent: ${name}`);
 }
 
 function logNotificationResults(results) {
