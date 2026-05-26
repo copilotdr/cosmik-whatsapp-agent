@@ -771,11 +771,15 @@ async function notifyIncomingMessage(message, mode = "auto") {
     `Mensaje: ${message.text}`
   ].filter(Boolean).join("\n");
 
-  await Promise.allSettled([
+  const media = message.mediaId ? await downloadWhatsAppMedia(message) : null;
+  const results = await Promise.allSettled([
     sendTelegramText(text),
-    sendTelegramMedia(message, text),
-    sendAdminWhatsappText(text)
+    media ? sendTelegramMedia(message, text, media) : null,
+    sendAdminWhatsappText(text),
+    media ? sendAdminWhatsappMedia(message, text, media) : null
   ]);
+
+  logNotificationResults(results);
 }
 
 async function notifyTelegram(order) {
@@ -838,17 +842,11 @@ async function sendTelegramText(text) {
   });
 }
 
-async function sendTelegramMedia(message, caption) {
+async function sendTelegramMedia(message, caption, media) {
   if (!config.telegramBotToken || !config.telegramChatId || !message.mediaId) return;
 
   try {
-    const mediaUrl = await getWhatsAppMediaUrl(message.mediaId);
-    const mediaResponse = await axios.get(mediaUrl, {
-      responseType: "arraybuffer",
-      headers: { Authorization: `Bearer ${config.whatsappToken}` }
-    });
-
-    const file = new Blob([mediaResponse.data], {
+    const file = new Blob([media.buffer], {
       type: message.mimeType || "application/octet-stream"
     });
     const form = new FormData();
@@ -858,10 +856,30 @@ async function sendTelegramMedia(message, caption) {
     form.append("caption", caption.slice(0, 1000));
     form.append(field, file, message.filename || `cosmik-${message.type || "media"}`);
 
-    await axios.post(`https://api.telegram.org/bot${config.telegramBotToken}/${endpoint}`, form);
+    const response = await fetch(`https://api.telegram.org/bot${config.telegramBotToken}/${endpoint}`, {
+      method: "POST",
+      body: form
+    });
+
+    if (!response.ok) {
+      throw new Error(`Telegram media HTTP ${response.status}: ${await response.text()}`);
+    }
   } catch (error) {
     console.error("Telegram media notification failed:", error.response?.data || error.message);
   }
+}
+
+async function downloadWhatsAppMedia(message) {
+  const mediaUrl = await getWhatsAppMediaUrl(message.mediaId);
+  const mediaResponse = await axios.get(mediaUrl, {
+    responseType: "arraybuffer",
+    headers: { Authorization: `Bearer ${config.whatsappToken}` }
+  });
+
+  return {
+    buffer: mediaResponse.data,
+    mimeType: mediaResponse.headers["content-type"] || message.mimeType || "application/octet-stream"
+  };
 }
 
 async function getWhatsAppMediaUrl(mediaId) {
@@ -882,6 +900,80 @@ function telegramMediaTarget(type = "") {
 async function sendAdminWhatsappText(text) {
   if (!config.adminWhatsappNumber) return;
   await sendWhatsAppText(config.adminWhatsappNumber, text);
+}
+
+async function sendAdminWhatsappMedia(message, caption, media) {
+  if (!config.adminWhatsappNumber || !message.mediaId) return;
+
+  const uploadedMediaId = await uploadWhatsAppMedia(media, message);
+  await sendWhatsAppMedia(config.adminWhatsappNumber, uploadedMediaId, message, caption);
+}
+
+async function uploadWhatsAppMedia(media, message) {
+  const file = new Blob([media.buffer], {
+    type: media.mimeType || message.mimeType || "application/octet-stream"
+  });
+  const form = new FormData();
+  form.append("messaging_product", "whatsapp");
+  form.append("type", media.mimeType || message.mimeType || "application/octet-stream");
+  form.append("file", file, message.filename || `cosmik-${message.type || "media"}`);
+
+  const response = await fetch(
+    `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/media`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${config.whatsappToken}` },
+      body: form
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`WhatsApp media upload HTTP ${response.status}: ${await response.text()}`);
+  }
+
+  const data = await response.json();
+  return data.id;
+}
+
+async function sendWhatsAppMedia(to, mediaId, message, caption) {
+  const type = whatsappMediaType(message.type);
+  const url = `https://graph.facebook.com/${config.graphVersion}/${config.phoneNumberId}/messages`;
+  const mediaPayload = { id: mediaId };
+
+  if (type !== "audio") {
+    mediaPayload.caption = caption.slice(0, 1000);
+  }
+
+  await axios.post(
+    url,
+    {
+      messaging_product: "whatsapp",
+      to,
+      type,
+      [type]: mediaPayload
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${config.whatsappToken}`,
+        "Content-Type": "application/json"
+      }
+    }
+  );
+}
+
+function whatsappMediaType(type = "") {
+  if (type === "image") return "image";
+  if (type === "video") return "video";
+  if (type === "audio" || type === "voice") return "audio";
+  return "document";
+}
+
+function logNotificationResults(results) {
+  for (const result of results) {
+    if (result.status === "rejected") {
+      console.error("Notification channel failed:", result.reason?.response?.data || result.reason?.message || result.reason);
+    }
+  }
 }
 
 async function sendCardPaymentHoldMessage(to) {
