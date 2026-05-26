@@ -56,6 +56,7 @@ DASHBOARD_TOKEN=un-secreto-para-ver-el-dashboard
 GOOGLE_SHEETS_WEBHOOK_URL=https://script.google.com/macros/s/.../exec
 TELEGRAM_BOT_TOKEN=token-del-bot
 TELEGRAM_CHAT_ID=id-del-chat
+ADMIN_WHATSAPP_NUMBER=573001112233
 SUPABASE_URL=https://tu-proyecto.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=service-role-key
 ```
@@ -107,10 +108,22 @@ Tambien permite:
 
 ```text
 POST /api/manual-overrides?token={DASHBOARD_TOKEN}
+POST /api/manual-messages?token={DASHBOARD_TOKEN}
+POST /api/test-notification?token={DASHBOARD_TOKEN}
 PATCH /api/orders/{orderId}?token={DASHBOARD_TOKEN}
 ```
 
-Con esto puedes pausar el bot para un cliente especifico, reactivarlo y actualizar estados de pedidos desde el dashboard.
+Con esto puedes pausar el bot para un cliente especifico, responder manualmente por WhatsApp desde el dashboard, reactivarlo y actualizar estados de pedidos desde el dashboard.
+
+## Fotos, videos y referencias
+
+Cuando un cliente envia una foto, video, audio o documento por WhatsApp:
+
+- El mensaje se guarda como conversacion.
+- Se notifica al equipo por Telegram.
+- Si Telegram esta configurado, el servidor intenta reenviar tambien el archivo real.
+- El cliente recibe una confirmacion breve de que la referencia fue recibida.
+- El archivo no se envia a OpenAI como si fuera texto, para evitar respuestas inventadas sobre contenido visual.
 
 ## Supabase
 
@@ -137,6 +150,7 @@ Desde `dashboard.html` puedes poner un WhatsApp en pausa. Mientras este activo:
 - El bot no responde automaticamente a ese cliente.
 - La conversacion queda registrada.
 - Si Telegram esta configurado, llega aviso al equipo.
+- Puedes escribir una respuesta manual desde el dashboard y saldra por el mismo numero de WhatsApp conectado a la Cloud API.
 
 Para reactivar, usa el boton `Reactivar` en el dashboard.
 
@@ -229,6 +243,14 @@ https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates
 6. Copia el `chat.id` y guárdalo en Render como `TELEGRAM_CHAT_ID`.
 
 Cuando el agente detecte un pedido confirmado, enviara resumen a Telegram y Google Sheets si esas variables estan configuradas.
+
+Ademas, cada mensaje entrante puede reenviarse a Telegram y a un WhatsApp interno. Para WhatsApp interno define:
+
+```text
+ADMIN_WHATSAPP_NUMBER=57...
+```
+
+Usa el numero en formato internacional, solo digitos. Ejemplo Colombia: `573001112233`.
 
 ## Desarrollo local
 
