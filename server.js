@@ -17,6 +17,7 @@ const config = {
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
   telegramChatId: process.env.TELEGRAM_CHAT_ID,
+  adminWhatsappNumber: normalizeWhatsapp(process.env.ADMIN_WHATSAPP_NUMBER || ""),
   maxConversationTurns: Number(process.env.MAX_CONVERSATION_TURNS || 8),
   fallbackReply:
     process.env.FALLBACK_REPLY ||
@@ -214,6 +215,62 @@ app.patch("/api/orders/:id", async (req, res) => {
   }
 });
 
+app.post("/api/manual-messages", async (req, res) => {
+  if (!isAuthorizedAdmin(req)) {
+    res.sendStatus(401);
+    return;
+  }
+
+  const to = normalizeWhatsapp(req.body?.to);
+  const text = req.body?.text?.toString().trim();
+
+  if (!to || !text) {
+    res.status(400).json({ error: "to_and_text_required" });
+    return;
+  }
+
+  try {
+    await sendWhatsAppText(to, text);
+    await appendConversation({
+      id: `manual_${Date.now()}_${to}`,
+      from: to,
+      name: req.body?.name || "",
+      text: "",
+      reply: `[Manual] ${text}`
+    });
+    res.json({ ok: true });
+  } catch (error) {
+    console.error("Manual message send failed:", error.response?.data || error.message);
+    res.status(500).json({ error: "manual_message_send_failed" });
+  }
+});
+
+app.post("/api/test-notification", async (req, res) => {
+  if (!isAuthorizedAdmin(req)) {
+    res.sendStatus(401);
+    return;
+  }
+
+  const sample = {
+    id: `test_${Date.now()}`,
+    from: config.adminWhatsappNumber || "573108001469",
+    name: "Prueba Cosmik",
+    text: req.body?.text || "Mensaje de prueba de notificaciones Cosmik."
+  };
+
+  try {
+    await notifyIncomingMessage(sample, "test");
+    res.json({
+      ok: true,
+      telegramConfigured: Boolean(config.telegramBotToken && config.telegramChatId),
+      whatsappConfigured: Boolean(config.adminWhatsappNumber)
+    });
+  } catch (error) {
+    console.error("Test notification failed:", error.response?.data || error.message);
+    res.status(500).json({ error: "test_notification_failed" });
+  }
+});
+
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -236,13 +293,25 @@ app.post("/webhook", async (req, res) => {
     processedMessageIds.add(message.id);
 
     console.log("Mensaje recibido:", message.from, message.text);
+
     if (await isManualOverrideActive(message.from)) {
       await appendConversation({
         ...message,
         reply: "[Modo manual activo: el bot no respondio automaticamente.]"
       });
+      await notifyIncomingMessage(message, "manual");
       await notifyManualOverrideMessage(message);
       console.log(`Modo manual activo para ${message.from}; no se envio respuesta automatica.`);
+      continue;
+    }
+
+    await notifyIncomingMessage(message, "auto");
+
+    if (message.mediaId) {
+      const reply = "Gracias, recibimos tu referencia. La compartimos con el equipo para revisarla y ayudarte mejor.";
+      await appendConversation({ ...message, reply });
+      await sendWhatsAppText(message.from, reply);
+      console.log(`Referencia multimedia escalada para ${message.from}`);
       continue;
     }
 
@@ -274,12 +343,29 @@ function extractMessages(payload = {}) {
       );
 
       for (const message of value.messages || []) {
-        if (message.type !== "text" || !message.text?.body) continue;
+        if (message.type === "text" && message.text?.body) {
+          messages.push({
+            id: message.id,
+            from: message.from,
+            name: contactNameByWaId.get(message.from) || "",
+            type: "text",
+            text: message.text.body.trim()
+          });
+          continue;
+        }
+
+        const media = message[message.type];
+        if (!media?.id) continue;
+
         messages.push({
           id: message.id,
           from: message.from,
           name: contactNameByWaId.get(message.from) || "",
-          text: message.text.body.trim()
+          type: message.type,
+          text: media.caption?.trim() || `[Referencia recibida: ${message.type}]`,
+          mediaId: media.id,
+          mimeType: media.mime_type || "",
+          filename: media.filename || `${message.type}-${message.id}`
         });
       }
     }
@@ -672,6 +758,26 @@ function normalizeWhatsapp(value = "") {
   return value.toString().replace(/\D/g, "");
 }
 
+async function notifyIncomingMessage(message, mode = "auto") {
+  const text = [
+    message.mediaId
+      ? "Referencia multimedia entrante Cosmik"
+      : mode === "manual" ? "Mensaje entrante Cosmik (bot pausado)" : "Mensaje entrante Cosmik",
+    `Cliente: ${message.name || "Sin nombre"}`,
+    `WhatsApp: ${message.from}`,
+    `Modo: ${mode === "manual" ? "manual" : mode === "test" ? "prueba" : "automatico"}`,
+    message.mediaId ? `Tipo: ${message.type || "media"}` : null,
+    message.filename ? `Archivo: ${message.filename}` : null,
+    `Mensaje: ${message.text}`
+  ].filter(Boolean).join("\n");
+
+  await Promise.allSettled([
+    sendTelegramText(text),
+    sendTelegramMedia(message, text),
+    sendAdminWhatsappText(text)
+  ]);
+}
+
 async function notifyTelegram(order) {
   if (!config.telegramBotToken || !config.telegramChatId) return;
 
@@ -698,10 +804,7 @@ async function notifyTelegram(order) {
   ].filter(Boolean).join("\n");
 
   try {
-    await axios.post(`https://api.telegram.org/bot${config.telegramBotToken}/sendMessage`, {
-      chat_id: config.telegramChatId,
-      text
-    });
+    await sendTelegramText(text);
     console.log("Telegram order notification sent:", order.id || order.from);
   } catch (error) {
     console.error("Telegram notification failed:", error.response?.data || error.message);
@@ -720,13 +823,65 @@ async function notifyManualOverrideMessage(message) {
   ].join("\n");
 
   try {
-    await axios.post(`https://api.telegram.org/bot${config.telegramBotToken}/sendMessage`, {
-      chat_id: config.telegramChatId,
-      text
-    });
+    await sendTelegramText(text);
   } catch (error) {
     console.error("Manual override Telegram notification failed:", error.response?.data || error.message);
   }
+}
+
+async function sendTelegramText(text) {
+  if (!config.telegramBotToken || !config.telegramChatId) return;
+
+  await axios.post(`https://api.telegram.org/bot${config.telegramBotToken}/sendMessage`, {
+    chat_id: config.telegramChatId,
+    text
+  });
+}
+
+async function sendTelegramMedia(message, caption) {
+  if (!config.telegramBotToken || !config.telegramChatId || !message.mediaId) return;
+
+  try {
+    const mediaUrl = await getWhatsAppMediaUrl(message.mediaId);
+    const mediaResponse = await axios.get(mediaUrl, {
+      responseType: "arraybuffer",
+      headers: { Authorization: `Bearer ${config.whatsappToken}` }
+    });
+
+    const file = new Blob([mediaResponse.data], {
+      type: message.mimeType || "application/octet-stream"
+    });
+    const form = new FormData();
+    const { endpoint, field } = telegramMediaTarget(message.type);
+
+    form.append("chat_id", config.telegramChatId);
+    form.append("caption", caption.slice(0, 1000));
+    form.append(field, file, message.filename || `cosmik-${message.type || "media"}`);
+
+    await axios.post(`https://api.telegram.org/bot${config.telegramBotToken}/${endpoint}`, form);
+  } catch (error) {
+    console.error("Telegram media notification failed:", error.response?.data || error.message);
+  }
+}
+
+async function getWhatsAppMediaUrl(mediaId) {
+  const response = await axios.get(
+    `https://graph.facebook.com/${config.graphVersion}/${mediaId}`,
+    { headers: { Authorization: `Bearer ${config.whatsappToken}` } }
+  );
+  return response.data?.url;
+}
+
+function telegramMediaTarget(type = "") {
+  if (type === "image") return { endpoint: "sendPhoto", field: "photo" };
+  if (type === "video") return { endpoint: "sendVideo", field: "video" };
+  if (type === "audio" || type === "voice") return { endpoint: "sendAudio", field: "audio" };
+  return { endpoint: "sendDocument", field: "document" };
+}
+
+async function sendAdminWhatsappText(text) {
+  if (!config.adminWhatsappNumber) return;
+  await sendWhatsAppText(config.adminWhatsappNumber, text);
 }
 
 async function sendCardPaymentHoldMessage(to) {
