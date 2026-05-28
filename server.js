@@ -528,6 +528,8 @@ async function handleTelegramUpdate(update = {}) {
     return;
   }
 
+  if (await handleTelegramReplyToNotification(update.message)) return;
+
   const text = update.message?.text?.trim();
   if (!text) return;
 
@@ -573,9 +575,31 @@ async function handleTelegramCallback(callbackQuery = {}) {
   }
 
   if (action === "reply") {
-    await answerTelegramCallback(callbackQuery.id, "Te deje el formato para responder.");
-    await sendTelegramText(`Para responderle a ${whatsapp}, escribe:\nresponder ${whatsapp}: tu mensaje`);
+    await answerTelegramCallback(callbackQuery.id, "Puedes responder directo a esta notificacion.");
+    await sendTelegramText(`Para responderle a ${whatsapp}, puedes:\n1. Responder directo a la notificacion del cliente en Telegram.\n2. O escribir: responder ${whatsapp}: tu mensaje`);
   }
+}
+
+async function handleTelegramReplyToNotification(message = {}) {
+  const replyText = message.reply_to_message?.text || message.reply_to_message?.caption || "";
+  const whatsapp = extractWhatsappFromTelegramText(replyText);
+  if (!whatsapp) return false;
+
+  const media = await extractTelegramOutboundMedia(message);
+  const text = (message.text || message.caption || "").trim();
+
+  if (media) {
+    await sendManualMediaFromTelegram(whatsapp, media, text);
+    return true;
+  }
+
+  if (text) {
+    await sendManualWhatsappFromTelegram(whatsapp, text);
+    return true;
+  }
+
+  await sendTelegramText("No pude enviar esa respuesta. Escribe texto o adjunta una foto/video/documento respondiendo a la notificacion.");
+  return true;
 }
 
 async function handleTelegramCommand(text) {
@@ -623,6 +647,31 @@ async function sendManualWhatsappFromTelegram(to, text) {
     reply: `[Manual Telegram] ${text}`
   });
   await sendTelegramText(`Enviado a ${to}:\n${text}`);
+}
+
+async function sendManualMediaFromTelegram(to, media, caption = "") {
+  await setManualOverride({
+    whatsapp: to,
+    active: true,
+    note: "Archivo manual enviado desde Telegram"
+  });
+
+  const downloaded = await downloadTelegramFile(media.fileId);
+  const whatsappMessage = {
+    type: media.type,
+    mimeType: media.mimeType,
+    filename: media.filename
+  };
+  const uploadedMediaId = await uploadWhatsAppMedia(downloaded, whatsappMessage);
+  await sendWhatsAppMedia(to, uploadedMediaId, whatsappMessage, caption || "Te compartimos la referencia.");
+  await appendConversation({
+    id: `telegram_media_${Date.now()}_${to}`,
+    from: to,
+    name: "",
+    text: "",
+    reply: `[Manual Telegram archivo] ${caption || media.filename || media.type}`
+  });
+  await sendTelegramText(`Archivo enviado a ${to}${caption ? `:\n${caption}` : "."}`);
 }
 
 async function answerTelegramCallback(callbackQueryId, text) {
@@ -1110,6 +1159,62 @@ async function sendTelegramMedia(message, caption, media) {
   } catch (error) {
     console.error("Telegram media notification failed:", error.response?.data || error.message);
   }
+}
+
+async function downloadTelegramFile(fileId) {
+  const fileResponse = await axios.get(
+    `https://api.telegram.org/bot${config.telegramBotToken}/getFile`,
+    { params: { file_id: fileId } }
+  );
+  const filePath = fileResponse.data?.result?.file_path;
+  if (!filePath) throw new Error("Telegram file path unavailable");
+
+  const mediaResponse = await axios.get(
+    `https://api.telegram.org/file/bot${config.telegramBotToken}/${filePath}`,
+    { responseType: "arraybuffer" }
+  );
+
+  return {
+    buffer: mediaResponse.data,
+    mimeType: mediaResponse.headers["content-type"] || "application/octet-stream"
+  };
+}
+
+async function extractTelegramOutboundMedia(message = {}) {
+  const photo = message.photo?.at(-1);
+  if (photo?.file_id) {
+    return {
+      type: "image",
+      fileId: photo.file_id,
+      mimeType: "image/jpeg",
+      filename: `telegram-photo-${message.message_id || Date.now()}.jpg`
+    };
+  }
+
+  if (message.video?.file_id) {
+    return {
+      type: "video",
+      fileId: message.video.file_id,
+      mimeType: message.video.mime_type || "video/mp4",
+      filename: message.video.file_name || `telegram-video-${message.message_id || Date.now()}.mp4`
+    };
+  }
+
+  if (message.document?.file_id) {
+    return {
+      type: "document",
+      fileId: message.document.file_id,
+      mimeType: message.document.mime_type || "application/octet-stream",
+      filename: message.document.file_name || `telegram-document-${message.message_id || Date.now()}`
+    };
+  }
+
+  return null;
+}
+
+function extractWhatsappFromTelegramText(text = "") {
+  const match = text.match(/WhatsApp:\s*([+\d][\d\s-]{6,})/i);
+  return match ? normalizeWhatsapp(match[1]) : "";
 }
 
 async function downloadWhatsAppMedia(message) {
