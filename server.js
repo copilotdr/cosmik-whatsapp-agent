@@ -17,6 +17,9 @@ const config = {
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
   telegramChatId: process.env.TELEGRAM_CHAT_ID,
+  telegramWebhookUrl:
+    process.env.TELEGRAM_WEBHOOK_URL ||
+    buildTelegramWebhookUrl(process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "https://api.wearecosmik.com"),
   adminWhatsappNumber: normalizeWhatsapp(process.env.ADMIN_WHATSAPP_NUMBER || ""),
   maxConversationTurns: Number(process.env.MAX_CONVERSATION_TURNS || 8),
   fallbackReply:
@@ -49,6 +52,26 @@ const knowledgeBase = {
     free_shipping:
       "Envio gratis en compras desde $250.000 COP."
   },
+  payments: {
+    methods:
+      "Metodos validos: transferencia Bancolombia o link de pago/tarjeta. No ofrecer efectivo como metodo de pago normal.",
+    pickup_deposit:
+      "Para recogida, el pedido se separa con 50% de anticipo.",
+    bancolombia: {
+      account: "467-000104-99",
+      holder: "Katerina Barros",
+      keys: "@katerina542"
+    }
+  },
+  discounts: [
+    "Desde la 6ta unidad del mismo producto aplica 10% de descuento.",
+    "Envio gratis en compras desde $250.000 COP."
+  ],
+  custom_products: [
+    "Si el cliente pide una forma o referencia que no aparece en catalogo, no afirmar que existe.",
+    "Responder que se puede revisar como pedido personalizado con tiempo, sujeto a molde, diseno y disponibilidad del equipo.",
+    "Pedir referencia visual si el cliente la tiene y escalar al equipo."
+  ],
   personalization: ["color", "mensaje", "flor", "olor", "acabado", "etiqueta"],
   products: [
     { name: "Dado D&D", category: "Velas", price_cop: 45000, url: "https://www.wearecosmik.com/" },
@@ -311,6 +334,16 @@ app.get("/webhook", (req, res) => {
   res.sendStatus(403);
 });
 
+app.post("/telegram/webhook", async (req, res) => {
+  res.status(200).json({ ok: true });
+
+  try {
+    await handleTelegramUpdate(req.body || {});
+  } catch (error) {
+    console.error("Telegram webhook handling failed:", error.response?.data || error.message);
+  }
+});
+
 app.post("/webhook", async (req, res) => {
   const messages = extractMessages(req.body);
   res.status(200).json({ ok: true, received: messages.length });
@@ -327,7 +360,6 @@ app.post("/webhook", async (req, res) => {
         reply: "[Modo manual activo: el bot no respondio automaticamente.]"
       });
       await notifyIncomingMessage(message, "manual");
-      await notifyManualOverrideMessage(message);
       console.log(`Modo manual activo para ${message.from}; no se envio respuesta automatica.`);
       continue;
     }
@@ -438,9 +470,17 @@ Objetivo:
 - Recopilar: producto, cantidad, color, aroma, nombre, telefono, direccion, fecha deseada, metodo de pago y mensaje personalizado si aplica.
 
 Reglas:
-- No inventes precios, stock, promociones, metodos de pago ni fechas.
+- No inventes productos, precios, stock, promociones, metodos de pago ni fechas.
 - Cosmik trabaja on-demand, no con stock fijo.
+- Si el cliente pide una forma/producto que no aparece en la base, no digas que lo tenemos. Di que podemos revisarlo como personalizado con tiempo, sujeto a molde, diseno y disponibilidad del equipo.
+- Si el cliente pregunta por descuentos: desde la 6ta unidad del mismo producto aplica 10% de descuento. En compras desde $250.000 COP el envio es gratis.
+- No ofrezcas efectivo como metodo de pago normal.
+- Metodos de pago validos: transferencia Bancolombia o link de pago/tarjeta. Para recogida, el pedido se separa con 50% de anticipo.
+- Datos de transferencia Bancolombia: cuenta 467-000104-99, Katerina Barros. Llaves: @katerina542.
 - Si el producto es un bouquet, pregunta que tipo de flores o estilo quiere antes de cerrar. Mientras el catalogo de flores no este confirmado, no inventes flores disponibles; pregunta su preferencia y di que el equipo confirma disponibilidad.
+- Para bouquets, el mensaje/etiqueta personalizada y el aroma son obligatorios antes de confirmar.
+- Para velas normales, no preguntes por mensaje personalizado salvo que el cliente lo pida o sea parte del producto.
+- Para velas y bouquets, confirma aroma cuando aplique.
 - Si falta informacion, haz una sola pregunta concreta a la vez.
 - Si el historial esta vacio, empieza siempre con un saludo corto y natural antes de responder la solicitud del cliente.
 - Usa el historial de conversacion para continuar el proceso; no vuelvas a saludar ni a empezar desde cero si el cliente ya esta avanzando un pedido.
@@ -476,6 +516,123 @@ async function sendWhatsAppText(to, text) {
         Authorization: `Bearer ${config.whatsappToken}`,
         "Content-Type": "application/json"
       }
+    }
+  );
+}
+
+async function handleTelegramUpdate(update = {}) {
+  if (!isAllowedTelegramChat(update)) return;
+
+  if (update.callback_query) {
+    await handleTelegramCallback(update.callback_query);
+    return;
+  }
+
+  const text = update.message?.text?.trim();
+  if (!text) return;
+
+  await handleTelegramCommand(text);
+}
+
+function isAllowedTelegramChat(update = {}) {
+  if (!config.telegramChatId) return false;
+
+  const chatId = update.message?.chat?.id || update.callback_query?.message?.chat?.id;
+  return chatId?.toString() === config.telegramChatId.toString();
+}
+
+async function handleTelegramCallback(callbackQuery = {}) {
+  const [action, rawWhatsapp] = (callbackQuery.data || "").split(":");
+  const whatsapp = normalizeWhatsapp(rawWhatsapp);
+
+  if (!whatsapp) {
+    await answerTelegramCallback(callbackQuery.id, "No encontre el WhatsApp del cliente.");
+    return;
+  }
+
+  if (action === "pause") {
+    await setManualOverride({
+      whatsapp,
+      active: true,
+      note: "Pausado desde Telegram"
+    });
+    await answerTelegramCallback(callbackQuery.id, "Bot pausado para este cliente.");
+    await sendTelegramText(`Bot pausado para ${whatsapp}.\nPara responderle escribe:\nresponder ${whatsapp}: tu mensaje`);
+    return;
+  }
+
+  if (action === "resume") {
+    await setManualOverride({
+      whatsapp,
+      active: false,
+      note: "Reactivado desde Telegram"
+    });
+    await answerTelegramCallback(callbackQuery.id, "Bot reactivado para este cliente.");
+    await sendTelegramText(`Bot reactivado para ${whatsapp}.`);
+    return;
+  }
+
+  if (action === "reply") {
+    await answerTelegramCallback(callbackQuery.id, "Te deje el formato para responder.");
+    await sendTelegramText(`Para responderle a ${whatsapp}, escribe:\nresponder ${whatsapp}: tu mensaje`);
+  }
+}
+
+async function handleTelegramCommand(text) {
+  const replyMatch = text.match(/^(?:responder|enviar)\s+(\+?\d[\d\s-]{6,})\s*:\s*([\s\S]+)/i);
+  if (replyMatch) {
+    const to = normalizeWhatsapp(replyMatch[1]);
+    const message = replyMatch[2].trim();
+    await sendManualWhatsappFromTelegram(to, message);
+    return;
+  }
+
+  const pauseMatch = text.match(/^pausar\s+(\+?\d[\d\s-]{6,})/i);
+  if (pauseMatch) {
+    const whatsapp = normalizeWhatsapp(pauseMatch[1]);
+    await setManualOverride({ whatsapp, active: true, note: "Pausado desde Telegram" });
+    await sendTelegramText(`Bot pausado para ${whatsapp}.`);
+    return;
+  }
+
+  const resumeMatch = text.match(/^(?:reactivar|activar)\s+(\+?\d[\d\s-]{6,})/i);
+  if (resumeMatch) {
+    const whatsapp = normalizeWhatsapp(resumeMatch[1]);
+    await setManualOverride({ whatsapp, active: false, note: "Reactivado desde Telegram" });
+    await sendTelegramText(`Bot reactivado para ${whatsapp}.`);
+  }
+}
+
+async function sendManualWhatsappFromTelegram(to, text) {
+  if (!to || !text) {
+    await sendTelegramText("No pude enviar. Usa: responder 573001112233: mensaje");
+    return;
+  }
+
+  await setManualOverride({
+    whatsapp: to,
+    active: true,
+    note: "Respuesta manual enviada desde Telegram"
+  });
+  await sendWhatsAppText(to, text);
+  await appendConversation({
+    id: `telegram_manual_${Date.now()}_${to}`,
+    from: to,
+    name: "",
+    text: "",
+    reply: `[Manual Telegram] ${text}`
+  });
+  await sendTelegramText(`Enviado a ${to}:\n${text}`);
+}
+
+async function answerTelegramCallback(callbackQueryId, text) {
+  if (!config.telegramBotToken || !callbackQueryId) return;
+
+  await axios.post(
+    `https://api.telegram.org/bot${config.telegramBotToken}/answerCallbackQuery`,
+    {
+      callback_query_id: callbackQueryId,
+      text
     }
   );
 }
@@ -833,6 +990,11 @@ function normalizeWhatsapp(value = "") {
   return value.toString().replace(/\D/g, "");
 }
 
+function buildTelegramWebhookUrl(baseUrl = "") {
+  const normalized = baseUrl.toString().trim().replace(/\/$/, "");
+  return normalized ? `${normalized}/telegram/webhook` : "";
+}
+
 async function notifyIncomingMessage(message, mode = "auto") {
   const text = [
     message.mediaId
@@ -848,7 +1010,7 @@ async function notifyIncomingMessage(message, mode = "auto") {
 
   const media = message.mediaId ? await downloadWhatsAppMedia(message) : null;
   const results = await Promise.allSettled([
-    runNotificationChannel("telegram_text", () => sendTelegramText(text)),
+    runNotificationChannel("telegram_text", () => sendTelegramText(text, customerActionButtons(message.from, mode))),
     media ? runNotificationChannel("telegram_media", () => sendTelegramMedia(message, text, media)) : null,
     runNotificationChannel("admin_whatsapp_text", () => sendAdminWhatsappText(text)),
     media ? runNotificationChannel("admin_whatsapp_media", () => sendAdminWhatsappMedia(message, text, media)) : null
@@ -883,7 +1045,7 @@ async function notifyTelegram(order) {
   ].filter(Boolean).join("\n");
 
   try {
-    await sendTelegramText(text);
+    await sendTelegramText(text, customerActionButtons(order.from || order.phone || "", "order"));
     console.log("Telegram order notification sent:", order.id || order.from);
   } catch (error) {
     console.error("Telegram notification failed:", error.response?.data || error.message);
@@ -902,19 +1064,25 @@ async function notifyManualOverrideMessage(message) {
   ].join("\n");
 
   try {
-    await sendTelegramText(text);
+    await sendTelegramText(text, customerActionButtons(message.from, "manual"));
   } catch (error) {
     console.error("Manual override Telegram notification failed:", error.response?.data || error.message);
   }
 }
 
-async function sendTelegramText(text) {
+async function sendTelegramText(text, replyMarkup = null) {
   if (!config.telegramBotToken || !config.telegramChatId) return;
 
-  await axios.post(`https://api.telegram.org/bot${config.telegramBotToken}/sendMessage`, {
+  const body = {
     chat_id: config.telegramChatId,
     text
-  });
+  };
+
+  if (replyMarkup) {
+    body.reply_markup = replyMarkup;
+  }
+
+  await axios.post(`https://api.telegram.org/bot${config.telegramBotToken}/sendMessage`, body);
 }
 
 async function sendTelegramMedia(message, caption, media) {
@@ -1082,6 +1250,35 @@ function logNotificationResults(results) {
     if (result.status === "rejected") {
       console.error("Notification channel failed:", result.reason?.response?.data || result.reason?.message || result.reason);
     }
+  }
+}
+
+function customerActionButtons(whatsapp, mode = "auto") {
+  const phone = normalizeWhatsapp(whatsapp);
+  if (!phone) return null;
+
+  return {
+    inline_keyboard: [
+      [
+        { text: "Responder", callback_data: `reply:${phone}` },
+        mode === "manual"
+          ? { text: "Reactivar bot", callback_data: `resume:${phone}` }
+          : { text: "Pausar bot", callback_data: `pause:${phone}` }
+      ]
+    ]
+  };
+}
+
+async function setupTelegramWebhook() {
+  if (!config.telegramBotToken || !config.telegramWebhookUrl) return;
+
+  try {
+    await axios.post(`https://api.telegram.org/bot${config.telegramBotToken}/setWebhook`, {
+      url: config.telegramWebhookUrl
+    });
+    console.log(`Telegram webhook configured: ${config.telegramWebhookUrl}`);
+  } catch (error) {
+    console.error("Telegram webhook setup failed:", error.response?.data || error.message);
   }
 }
 
@@ -1282,6 +1479,7 @@ function weekdayFromText(value) {
 }
 
 subscribeWaba();
+setupTelegramWebhook();
 
 app.listen(config.port, () => {
   console.log(`Servidor activo en puerto ${config.port}`);

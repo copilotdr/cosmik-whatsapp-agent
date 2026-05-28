@@ -1,0 +1,143 @@
+{
+  "brand": {
+    "name": "Cosmik",
+    "website": "https://www.wearecosmik.com/",
+    "email": "equipocosmik@gmail.com",
+    "whatsapp": "+57 310 8001469",
+    "location": "Bogota, Colombia",
+    "store_type": "Online",
+    "hours": {
+      "monday_friday": "9am-7pm",
+      "saturday": "9am-1pm",
+      "sunday": "Resting"
+    },
+    "positioning": "Piezas artesanales personalizadas, disenadas y elaboradas con mucho amor y 100% a mano."
+  },
+  "shipping": {
+    "country": "Colombia",
+    "free_shipping_rules": [
+      "Recogida coordinada en Engativa, sector Gran Granada.",
+      "Envio a Bogota: $15.000 COP.",
+      "Envio a Colombia: $20.000 COP.",
+      "Envio gratis en compras desde $250.000 COP."
+    ],
+    "production_time": "Pedidos personalizados normalmente en 2 a 3 dias habiles, y en algunos casos antes. Confirmar disponibilidad antes de prometer fecha."
+  },
+  "discounts": [
+    "Desde la 6ta unidad del mismo producto aplica 10% de descuento.",
+    "Envio gratis en compras desde $250.000 COP."
+  ],
+  "payments": [
+    "Transferencia Bancolombia.",
+    "Link de pago/tarjeta, generado por el equipo con el valor exacto de la orden.",
+    "Para recogida, el pedido se separa con 50% de anticipo.",
+    "No ofrecer efectivo como metodo de pago normal."
+  ],
+  "bank_transfer": {
+    "bank": "Bancolombia",
+    "account": "467-000104-99",
+    "holder": "Katerina Barros",
+    "keys": "@katerina542"
+  },
+  "custom_products": [
+    "Si el cliente pide una forma o referencia que no aparece en catalogo, no afirmar que existe.",
+    "Responder que se puede revisar como pedido personalizado con tiempo, sujeto a molde, diseno y disponibilidad del equipo.",
+    "Pedir referencia visual si el cliente la tiene y escalar al equipo."
+  ],
+  "personalization": [
+    "Color",
+    "Mensaje",
+    "Flor",
+    "Olor",
+    "Acabado",
+    "Etiqueta holografica en bouquets"
+  ],
+  "products": [
+    {
+      "name": "Dado D&D",
+      "category": "Velas",
+      "price_cop": 45000,
+      "url": "https://www.wearecosmik.com/",
+      "notes": "Best seller visible en la pagina principal."
+    },
+    {
+      "name": "Pan Baguette",
+      "category": "Velas",
+      "price_cop": 10000,
+      "url": "https://www.wearecosmik.com/",
+      "notes": "Best seller visible en la pagina principal."
+    },
+    {
+      "name": "Corazon Flor Grande",
+      "category": "Velas",
+      "price_cop": 25000,
+      "url": "https://www.wearecosmik.com/",
+      "notes": "Best seller y tendencia visible en la pagina principal."
+    },
+    {
+      "name": "Corazon Flor Chiqui",
+      "category": "Velas",
+      "price_cop": 15000,
+      "url": "https://www.wearecosmik.com/",
+      "notes": "Best seller y tendencia visible en la pagina principal."
+    },
+    {
+      "name": "Cupcake con Merengue y Amor",
+      "category": "Velas",
+      "price_cop": 35000,
+      "url": "https://www.wearecosmik.com/",
+      "notes": "Best seller visible en la pagina principal."
+    },
+    {
+      "name": "Gelatina con Fresa",
+      "category": "Velas",
+      "price_cop": 35000,
+      "url": "https://www.wearecosmik.com/",
+      "notes": "Best seller visible en la pagina principal."
+    },
+    {
+      "name": "Bouquet Coqueto",
+      "category": "Velas",
+      "price_cop": 50000,
+      "url": "https://www.wearecosmik.com/",
+      "notes": "Producto en tendencia visible en la pagina principal."
+    },
+    {
+      "name": "Bouquet de Flores Corazon",
+      "category": "Velas",
+      "price_cop": 100000,
+      "url": "https://www.wearecosmik.com/",
+      "notes": "Producto en tendencia visible en la pagina principal."
+    },
+    {
+      "name": "Taza de cafe con crema",
+      "category": "Velas",
+      "price_cop": 60000,
+      "url": "https://www.wearecosmik.com/",
+      "notes": "Producto en tendencia visible en la pagina principal."
+    },
+    {
+      "name": "Forever Bouquet",
+      "category": "Bouquets de cera",
+      "price_cop": null,
+      "url": "https://www.wearecosmik.com/",
+      "notes": "Bouquet personalizable de cera. Medidas visibles: 20cm diametro x 32cm alto. No se marchita."
+    }
+  ],
+  "order_required_fields": [
+    "producto",
+    "cantidad",
+    "color",
+    "aroma",
+    "nombre",
+    "telefono",
+    "direccion",
+    "fecha deseada",
+    "metodo de pago",
+    "mensaje personalizado si aplica"
+  ],
+  "checkout": {
+    "website": "https://www.wearecosmik.com/",
+    "instruction": "No mandar el link general de la web para finalizar pedidos por WhatsApp. Cerrar por conversacion y, si el cliente pide tarjeta/link de pago, avisar que el equipo enviara un link personalizado con el valor exacto."
+  }
+}
