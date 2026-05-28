@@ -188,6 +188,26 @@
         color: #6b2219;
       }
 
+      details {
+        margin-top: 12px;
+      }
+
+      summary {
+        cursor: pointer;
+        font-weight: 700;
+      }
+
+      .thread {
+        display: grid;
+        gap: 10px;
+        margin-top: 10px;
+      }
+
+      .turn {
+        border-top: 1px solid #f0e7de;
+        padding-top: 10px;
+      }
+
       .split {
         display: grid;
         grid-template-columns: 1fr 1fr;
@@ -450,18 +470,36 @@
               <article>
                 <div class="actions">
                   <strong>${escapeHtml(item.name || item.from || "Cliente")}</strong>
+                  <span class="badge">${escapeHtml(item.turns.length)} mensajes</span>
                   ${item.status === "archivado" ? "<span class='badge'>archivado</span>" : ""}
-                  <button class="secondary" type="button" onclick="prefillManual('${escapeJs(item.from || item.customer_whatsapp || "")}')">Tomar manual</button>
+                  <button class="secondary" type="button" onclick="prefillManual('${escapeJs(item.from)}')">Tomar manual</button>
                   ${item.status === "archivado"
-                    ? `<button class="secondary" type="button" onclick="reopenChat('${escapeJs(item.from || item.customer_whatsapp || "")}')">Reabrir</button>`
-                    : `<button class="secondary" type="button" onclick="archiveChat('${escapeJs(item.from || item.customer_whatsapp || "")}')">Archivar chat</button>`}
+                    ? `<button class="secondary" type="button" onclick="reopenChat('${escapeJs(item.from)}')">Reabrir</button>`
+                    : `<button class="secondary" type="button" onclick="archiveChat('${escapeJs(item.from)}')">Archivar chat</button>`}
                 </div>
-                <p class="muted">${escapeHtml(formatDateTime(item.createdAt || item.created_at || ""))}</p>
-                <p class="text"><b>Cliente:</b> ${escapeHtml(item.text || item.incoming_text || "")}</p>
-                <p class="text"><b>Agente:</b> ${escapeHtml(item.reply || item.assistant_reply || "")}</p>
+                <p class="muted">${escapeHtml(item.from)} · Última actividad: ${escapeHtml(formatDateTime(item.latestAt))}</p>
+                <p class="text"><b>Último cliente:</b> ${escapeHtml(item.latestText || "")}</p>
+                <p class="text"><b>Último agente:</b> ${escapeHtml(item.latestReply || "")}</p>
+                <details>
+                  <summary>Ver conversación completa</summary>
+                  <div class="thread">
+                    ${item.turns.map(renderConversationTurn).join("")}
+                  </div>
+                </details>
               </article>
             `).join("")
           : "<p class='muted'>No hay conversaciones activas para mostrar.</p>";
+      }
+
+      function renderConversationTurn(turn) {
+        const when = formatDateTime(turn.createdAt || turn.created_at || "");
+        return `
+          <div class="turn">
+            <p class="muted">${escapeHtml(when)}</p>
+            <p class="text"><b>Cliente:</b> ${escapeHtml(turn.text || turn.incoming_text || "")}</p>
+            <p class="text"><b>Agente:</b> ${escapeHtml(turn.reply || turn.assistant_reply || "")}</p>
+          </div>
+        `;
       }
 
       function renderManualOverrides(overrides) {
@@ -534,11 +572,43 @@
 
         for (const item of conversations) {
           const key = item.from || item.customer_whatsapp || "";
-          if (!key || byWhatsapp.has(key)) continue;
-          byWhatsapp.set(key, item);
+          if (!key) continue;
+
+          const current = byWhatsapp.get(key) || {
+            from: key,
+            name: item.name || item.customer_name || "",
+            status: item.status || "activo",
+            statusReason: item.statusReason || item.status_reason || "",
+            latestAt: "",
+            latestText: "",
+            latestReply: "",
+            turns: []
+          };
+
+          current.turns.push(item);
+
+          const itemTime = new Date(item.createdAt || item.created_at || 0).getTime();
+          const latestTime = new Date(current.latestAt || 0).getTime();
+          if (!current.latestAt || itemTime >= latestTime) {
+            current.name = item.name || item.customer_name || current.name;
+            current.status = item.status || current.status;
+            current.statusReason = item.statusReason || item.status_reason || current.statusReason;
+            current.latestAt = item.createdAt || item.created_at || "";
+            current.latestText = item.text || item.incoming_text || "";
+            current.latestReply = item.reply || item.assistant_reply || "";
+          }
+
+          byWhatsapp.set(key, current);
         }
 
-        return Array.from(byWhatsapp.values());
+        return Array.from(byWhatsapp.values())
+          .map((item) => ({
+            ...item,
+            turns: item.turns.sort((a, b) =>
+              new Date(a.createdAt || a.created_at || 0) - new Date(b.createdAt || b.created_at || 0)
+            )
+          }))
+          .sort((a, b) => new Date(b.latestAt || 0) - new Date(a.latestAt || 0));
       }
 
       function isUpcoming(order) {
