@@ -434,12 +434,15 @@ function extractMessages(payload = {}) {
 }
 
 async function buildReply(message, history = []) {
+  const scopedHistory = selectConversationHistory(message, history);
+
   try {
     const completion = await openai.chat.completions.create({
       model: config.openaiModel,
       messages: [
         { role: "system", content: buildSystemPrompt() },
-        ...historyToOpenAiMessages(history),
+        { role: "system", content: buildConversationContinuityInstruction(message, history, scopedHistory) },
+        ...historyToOpenAiMessages(scopedHistory),
         {
           role: "user",
           content: `Cliente escribe por WhatsApp: ${message.text}`
@@ -456,6 +459,35 @@ async function buildReply(message, history = []) {
     console.error("OpenAI reply failed:", error.response?.data || error.message);
     return config.fallbackReply;
   }
+}
+
+function selectConversationHistory(message, history = []) {
+  if (isGreetingOnly(message.text)) return [];
+
+  const recentHistory = history
+    .filter((turn) => isRecentConversationTurn(turn, 45))
+    .slice(-config.maxConversationTurns);
+
+  if (isAmbiguousFreshMessage(message.text)) return [];
+
+  return recentHistory;
+}
+
+function buildConversationContinuityInstruction(message, originalHistory = [], scopedHistory = []) {
+  if (!scopedHistory.length) {
+    return [
+      "Para este turno trata el mensaje como inicio de conversacion o cambio de tema.",
+      "No arrastres pedidos, pagos, datos de entrega ni instrucciones de conversaciones anteriores.",
+      "Responde solo a lo que el cliente acaba de escribir."
+    ].join(" ");
+  }
+
+  return [
+    "Usa el historial autorizado para mantener memoria y continuar el flujo.",
+    "El mensaje actual del cliente siempre tiene prioridad sobre el historial.",
+    "No repitas datos viejos como si fueran actuales si el cliente no los confirma en este turno.",
+    `Historial disponible: ${scopedHistory.length} de ${originalHistory.length} turnos recientes.`
+  ].join(" ");
 }
 
 function buildSystemPrompt() {
@@ -483,7 +515,9 @@ Reglas:
 - Para velas y bouquets, confirma aroma cuando aplique.
 - Si falta informacion, haz una sola pregunta concreta a la vez.
 - Si el historial esta vacio, empieza siempre con un saludo corto y natural antes de responder la solicitud del cliente.
+- Si el mensaje actual es solo un saludo, tratalo como una conversacion nueva aunque exista historial viejo.
 - Usa el historial de conversacion para continuar el proceso; no vuelvas a saludar ni a empezar desde cero si el cliente ya esta avanzando un pedido.
+- El mensaje actual manda sobre la memoria: no arrastres pagos, productos, direcciones ni confirmaciones antiguas si el cliente no las menciona o confirma ahora.
 - Si el cliente responde algo corto como "si", "confirmo", un telefono, una direccion, un color o un aroma, interpretalo segun la ultima pregunta del asistente.
 - Si ya hay un pedido en curso, conserva los datos ya dados y pide solamente el dato faltante mas importante.
 - No uses el nombre del perfil de WhatsApp para saludar o dirigirte a la persona, porque puede sentirse invasivo.
@@ -587,14 +621,21 @@ async function handleTelegramReplyToNotification(message = {}) {
 
   const media = await extractTelegramOutboundMedia(message);
   const text = (message.text || message.caption || "").trim();
+  const manualReplyText = extractManualReplyText(text);
+  const aiInstruction = extractAiInstruction(text);
+
+  if (aiInstruction) {
+    await sendAiDirectedReplyFromTelegram(whatsapp, aiInstruction);
+    return true;
+  }
 
   if (media) {
     await sendManualMediaFromTelegram(whatsapp, media, text);
     return true;
   }
 
-  if (text) {
-    await sendManualWhatsappFromTelegram(whatsapp, text);
+  if (manualReplyText || text) {
+    await sendManualWhatsappFromTelegram(whatsapp, manualReplyText || text);
     return true;
   }
 
@@ -603,6 +644,20 @@ async function handleTelegramReplyToNotification(message = {}) {
 }
 
 async function handleTelegramCommand(text) {
+  const helpMatch = text.match(/^\/?(?:ayuda|help|start|comandos)(?:@\w+)?\b/i);
+  if (helpMatch) {
+    await sendTelegramHelp();
+    return;
+  }
+
+  const aiMatch = text.match(/^\/?(?:ia|sugerir|asistente)(?:@\w+)?\s+(\+?\d[\d\s-]{6,})\s*:\s*([\s\S]+)/i);
+  if (aiMatch) {
+    const to = normalizeWhatsapp(aiMatch[1]);
+    const instruction = aiMatch[2].trim();
+    await sendAiDirectedReplyFromTelegram(to, instruction);
+    return;
+  }
+
   const replyMatch = text.match(/^\/?(?:responder|enviar)(?:@\w+)?\s+(\+?\d[\d\s-]{6,})\s*:\s*([\s\S]+)/i);
   if (replyMatch) {
     const to = normalizeWhatsapp(replyMatch[1]);
@@ -624,6 +679,11 @@ async function handleTelegramCommand(text) {
     const whatsapp = normalizeWhatsapp(resumeMatch[1]);
     await setManualOverride({ whatsapp, active: false, note: "Reactivado desde Telegram" });
     await sendTelegramText(`Bot reactivado para ${whatsapp}.`);
+    return;
+  }
+
+  if (/^\/?(?:ia|sugerir|asistente|responder|enviar|pausar|reactivar|activar)(?:@\w+)?\b/i.test(text)) {
+    await sendTelegramHelp();
   }
 }
 
@@ -647,6 +707,60 @@ async function sendManualWhatsappFromTelegram(to, text) {
     reply: `[Manual Telegram] ${text}`
   });
   await sendTelegramText(`Enviado a ${to}:\n${text}`);
+}
+
+async function sendAiDirectedReplyFromTelegram(to, instruction) {
+  if (!to || !instruction) {
+    await sendTelegramText("No pude generar respuesta. Usa: /ia 573001112233: instruccion para el bot");
+    return;
+  }
+
+  const history = await getRecentConversation(to);
+  const reply = await buildDirectedReply(to, instruction, history);
+
+  await setManualOverride({
+    whatsapp: to,
+    active: true,
+    note: "Respuesta con IA dirigida desde Telegram"
+  });
+  await sendWhatsAppText(to, reply);
+  await appendConversation({
+    id: `telegram_ai_${Date.now()}_${to}`,
+    from: to,
+    name: "",
+    text: `[Instruccion Telegram] ${instruction}`,
+    reply: `[IA Telegram] ${reply}`
+  });
+  await sendTelegramText(`Respuesta IA enviada a ${to}:\n${reply}`);
+}
+
+async function buildDirectedReply(to, instruction, history = []) {
+  try {
+    const completion = await openai.chat.completions.create({
+      model: config.openaiModel,
+      messages: [
+        { role: "system", content: buildSystemPrompt() },
+        ...historyToOpenAiMessages(history),
+        {
+          role: "user",
+          content: [
+            `El equipo de Cosmik quiere responder manualmente al cliente ${to}.`,
+            "Redacta una respuesta breve para WhatsApp siguiendo esta instruccion:",
+            instruction
+          ].join("\n")
+        }
+      ],
+      max_completion_tokens: 300
+    });
+
+    return (
+      completion.choices?.[0]?.message?.content?.trim() ||
+      "Gracias por la info. Ya lo revisamos y te confirmamos enseguida."
+    );
+  } catch (error) {
+    console.error("OpenAI directed reply failed:", error.response?.data || error.message);
+    return "Gracias por la info. Ya lo revisamos y te confirmamos enseguida.";
+  }
 }
 
 async function sendManualMediaFromTelegram(to, media, caption = "") {
@@ -707,41 +821,85 @@ async function captureConfirmedOrder(message, reply, history = []) {
 }
 
 async function analyzeOrder(message, reply, history = []) {
+  if (!isOrderConfirmationCandidate(`${message.text}\n${reply}`)) {
+    return { confirmed: false };
+  }
+
   try {
     const completion = await openai.chat.completions.create({
       model: config.openaiModel,
-      response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
-          content: [
-            "Analiza si el cliente acaba de confirmar un pedido de Cosmik.",
-            "Devuelve solo JSON valido.",
-            "Campos: confirmed boolean, product, quantity, color, scent, customerName, phone, address, deliveryDate, deliveryDateIso, paymentMethod, personalMessage, summary.",
-            "deliveryDate debe conservar la forma natural que dijo el cliente.",
-            "deliveryDateIso debe ser YYYY-MM-DD si puedes inferir una fecha exacta usando la fecha actual de Bogota; si no puedes, string vacio.",
-            "Si no hay confirmacion clara del pedido, confirmed debe ser false.",
-            "No inventes campos faltantes; usa strings vacios."
-          ].join(" ")
+          content: `Extrae datos de pedidos Cosmik. Responde SOLO JSON valido.
+Campos:
+confirmed boolean,
+product string,
+quantity string,
+color string,
+scent string,
+customerName string,
+phone string,
+address string,
+deliveryDate string,
+deliveryDateIso string YYYY-MM-DD si puedes inferirla, si no null,
+paymentMethod string,
+personalMessage string,
+summary string.
+Marca confirmed=true solo si el cliente ya confirmo el pedido o la respuesta del asistente dice que esta confirmado.`
         },
-        {
-          role: "user",
-          content: JSON.stringify({
-            currentDateBogota: getBogotaDateString(),
-            recentConversation: history,
-            customer: message,
-            assistantReply: reply
-          })
-        }
+        ...historyToOpenAiMessages(history),
+        { role: "user", content: `Mensaje cliente: ${message.text}\nRespuesta bot: ${reply}` }
       ],
-      max_completion_tokens: 450
+      response_format: { type: "json_object" },
+      max_completion_tokens: 350
     });
 
-    return JSON.parse(completion.choices?.[0]?.message?.content || "{}");
+    const parsed = JSON.parse(completion.choices?.[0]?.message?.content || "{}");
+    return {
+      ...parsed,
+      deliveryDateIso: parsed.deliveryDateIso || parseDate(parsed.deliveryDate)
+    };
   } catch (error) {
     console.error("Order analysis failed:", error.response?.data || error.message);
-    return null;
+    return { confirmed: false };
   }
+}
+
+function isOrderConfirmationCandidate(text = "") {
+  const value = normalizeText(text);
+  if (!value) return false;
+
+  if (isGreetingOnly(value)) return false;
+
+  const confirmationWords = /\b(confirmo|confirmado|si confirmo|sí confirmo|listo|perfecto|de acuerdo|dale|ok|okay|hagamoslo|hagámoslo|lo quiero|quiero comprar|quiero ordenar|quiero encargar|hacer pedido|cerrar pedido|tomar pedido|ese pedido|esa orden)\b/.test(value);
+  const orderDetails = /\b(pedido|orden|comprar|encargar|producto|bouquet|vela|cantidad|direccion|dirección|entrega|pago|transferencia|tarjeta|nombre|telefono|teléfono)\b/.test(value);
+
+  return confirmationWords && orderDetails;
+}
+
+function isAmbiguousFreshMessage(text = "") {
+  const value = normalizeText(text);
+  if (!value) return false;
+
+  const wordCount = value.split(/\s+/).filter(Boolean).length;
+  const looksLikeOrderContinuation = /\b(si|sí|confirmo|confirmado|listo|ok|okay|dale|quiero|producto|bouquet|vela|color|aroma|olor|direccion|dirección|telefono|teléfono|pago|tarjeta|transferencia|entrega|mañana|manana|hoy|sábado|sabado|domingo|lunes|martes|miércoles|miercoles|jueves|viernes|\d{7,})\b/.test(value);
+
+  return wordCount <= 3 && !looksLikeOrderContinuation;
+}
+
+function isRecentConversationTurn(turn = {}, maxMinutes = 45) {
+  if (!turn.created_at) return true;
+
+  const createdAt = new Date(turn.created_at).getTime();
+  if (Number.isNaN(createdAt)) return true;
+
+  return Date.now() - createdAt <= maxMinutes * 60 * 1000;
+}
+
+function isGreetingOnly(text = "") {
+  const value = normalizeText(text);
+  return /^(hola+|buenas|buenos dias|buenas tardes|buenas noches|hey|ey|hi|hello|holi|holaa+)[\s!.,]*$/.test(value);
 }
 
 async function getRecentConversation(customerWhatsapp) {
@@ -808,17 +966,16 @@ async function appendConversation(event) {
     });
 
     await supabaseUpsert("conversations", {
-      id: event.id,
-      whatsapp_message_id: event.id,
-      customer_id: event.from,
+      id: event.id || `${Date.now()}_${event.from}`,
       customer_whatsapp: event.from,
       customer_name: event.name || null,
-      incoming_text: event.text,
-      assistant_reply: event.reply,
+      incoming_text: event.text || null,
+      assistant_reply: event.reply || null,
+      raw_type: event.type || "text",
       created_at: now
     });
   } catch (error) {
-    console.error("Conversation persistence failed:", error.response?.data || error.message);
+    console.error("Conversation save failed:", error.response?.data || error.message);
   }
 }
 
@@ -827,65 +984,81 @@ async function appendOrder(order) {
 
   try {
     const now = new Date().toISOString();
-    await supabaseUpsert("customers", {
-      id: order.from,
-      whatsapp: order.from,
-      name: order.customerName || null,
-      last_seen_at: now,
-      updated_at: now
-    });
-
+    const estimatedValue = estimateOrderValue(order);
     await supabaseUpsert("orders", {
-      id: order.id || `order_${Date.now()}`,
-      whatsapp_message_id: order.id || null,
-      customer_id: order.from,
+      id: order.id || `${Date.now()}_${order.from}`,
       customer_whatsapp: order.from,
       customer_name: order.customerName || null,
-      status: "nuevo",
-      priority: "normal",
+      phone: order.phone || order.from || null,
       product: order.product || null,
-      quantity: parseInt(order.quantity, 10) || null,
+      quantity: order.quantity || null,
       color: order.color || null,
       scent: order.scent || null,
-      personal_message: order.personalMessage || null,
-      delivery_address: order.address || null,
-      desired_delivery_date: parseDate(order.deliveryDateIso || order.deliveryDate),
+      address: order.address || null,
+      delivery_date: order.deliveryDate || null,
+      delivery_date_iso: order.deliveryDateIso || parseDate(order.deliveryDate),
       payment_method: order.paymentMethod || null,
-      estimated_value_cop: estimateOrderValue(order),
+      personal_message: order.personalMessage || null,
       summary: order.summary || null,
+      estimated_value_cop: estimatedValue,
+      status: requiresPaymentLink(order.paymentMethod) ? "pendiente_link_pago" : "confirmado",
+      priority: requiresPaymentLink(order.paymentMethod) ? "alta" : "normal",
+      source_text: order.sourceText || null,
+      created_at: now,
       updated_at: now
     });
   } catch (error) {
-    console.error("Order persistence failed:", error.response?.data || error.message);
+    console.error("Order save failed:", error.response?.data || error.message);
   }
 }
 
 async function readDashboardData() {
-  if (!supabaseEnabled()) return { orders: [], conversations: [] };
+  if (!supabaseEnabled()) {
+    return { orders: [], conversations: [], manualOverrides: [] };
+  }
 
-  const [orders, conversations, conversationStatuses] = await Promise.all([
+  const [orders, conversations, statuses] = await Promise.all([
     supabaseGet("orders", { select: "*", order: "created_at.desc", limit: "250" }),
     supabaseGet("conversations", { select: "*", order: "created_at.desc", limit: "250" }),
     supabaseGet("conversation_statuses", { select: "*", order: "updated_at.desc", limit: "500" })
   ]);
-  const statusByWhatsapp = new Map(
-    conversationStatuses.map((row) => [row.customer_whatsapp, row])
+
+  const statusByWhatsapp = new Map(statuses.map((row) => [row.customer_whatsapp, row]));
+  const activeConversations = conversations.filter(
+    (row) => statusByWhatsapp.get(row.customer_whatsapp)?.status !== "archivado"
   );
 
   return {
     orders: orders.map((row) => ({
-      ...row,
-      createdAt: row.created_at,
+      id: row.id,
+      customerWhatsapp: row.customer_whatsapp,
       customerName: row.customer_name,
-      deliveryDate: row.desired_delivery_date,
-      paymentMethod: row.payment_method
+      phone: row.phone,
+      product: row.product,
+      quantity: row.quantity,
+      color: row.color,
+      scent: row.scent,
+      address: row.address,
+      deliveryDate: row.delivery_date,
+      deliveryDateIso: row.delivery_date_iso,
+      paymentMethod: row.payment_method,
+      personalMessage: row.personal_message,
+      summary: row.summary,
+      estimatedValueCop: row.estimated_value_cop,
+      status: row.status,
+      priority: row.priority,
+      teamNotes: row.team_notes,
+      checkoutUrl: row.checkout_url,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
     })),
-    conversations: conversations.map((row) => ({
-      ...row,
-      from: row.customer_whatsapp,
-      name: row.customer_name,
-      text: row.incoming_text,
-      reply: row.assistant_reply,
+    conversations: activeConversations.map((row) => ({
+      id: row.id,
+      customerWhatsapp: row.customer_whatsapp,
+      customerName: row.customer_name,
+      incomingText: row.incoming_text,
+      assistantReply: row.assistant_reply,
+      rawType: row.raw_type,
       createdAt: row.created_at,
       status: statusByWhatsapp.get(row.customer_whatsapp)?.status || "activo",
       statusReason: statusByWhatsapp.get(row.customer_whatsapp)?.reason || ""
@@ -1387,6 +1560,48 @@ async function setupTelegramWebhook() {
   }
 }
 
+async function setupTelegramCommands() {
+  if (!config.telegramBotToken) return;
+
+  try {
+    await axios.post(`https://api.telegram.org/bot${config.telegramBotToken}/setMyCommands`, {
+      commands: [
+        { command: "ia", description: "Pedirle al bot que redacte y envie una respuesta" },
+        { command: "responder", description: "Enviar un mensaje literal al cliente" },
+        { command: "pausar", description: "Pausar el bot para un cliente" },
+        { command: "reactivar", description: "Reactivar el bot para un cliente" },
+        { command: "ayuda", description: "Ver ejemplos de uso" }
+      ]
+    });
+    console.log("Telegram commands configured");
+  } catch (error) {
+    console.error("Telegram commands setup failed:", error.response?.data || error.message);
+  }
+}
+
+async function sendTelegramHelp() {
+  await sendTelegramText([
+    "Comandos de Cosmikat:",
+    "/ia 573001112233: instruccion para que el bot redacte y envie",
+    "/responder 573001112233: mensaje literal para el cliente",
+    "/pausar 573001112233",
+    "/reactivar 573001112233",
+    "",
+    "Tip: tambien puedes responder directo a una notificacion del cliente.",
+    "Si respondes con /ia, el bot redacta. Si respondes sin /ia, se envia literal."
+  ].join("\n"));
+}
+
+function extractAiInstruction(text = "") {
+  const match = text.match(/^\/?(?:ia|sugerir|asistente)(?:@\w+)?\s+([\s\S]+)/i);
+  return match?.[1]?.trim() || "";
+}
+
+function extractManualReplyText(text = "") {
+  const match = text.match(/^\/?(?:responder|enviar)(?:@\w+)?\s+([\s\S]+)/i);
+  return match?.[1]?.trim() || "";
+}
+
 async function sendCardPaymentHoldMessage(to) {
   await sendWhatsAppText(
     to,
@@ -1585,6 +1800,7 @@ function weekdayFromText(value) {
 
 subscribeWaba();
 setupTelegramWebhook();
+setupTelegramCommands();
 
 app.listen(config.port, () => {
   console.log(`Servidor activo en puerto ${config.port}`);
