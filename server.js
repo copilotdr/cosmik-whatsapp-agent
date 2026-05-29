@@ -346,7 +346,15 @@ app.post("/telegram/webhook", async (req, res) => {
 
 app.post("/webhook", async (req, res) => {
   const messages = extractMessages(req.body);
-  res.status(200).json({ ok: true, received: messages.length });
+    const businessEchoes = extractBusinessEchoes(req.body);
+  res.status(200).json({ ok: true, received: messages.length, echoes: businessEchoes.length });
+
+    for (const echo of businessEchoes) {
+          if (processedMessageIds.has(echo.id)) continue;
+          processedMessageIds.add(echo.id);
+
+          await handleBusinessAppEcho(echo);
+    }
 
   for (const message of messages) {
     if (processedMessageIds.has(message.id)) continue;
@@ -387,6 +395,88 @@ app.post("/webhook", async (req, res) => {
     }
   }
 });
+
+async function handleBusinessAppEcho(echo) {
+    console.log("Eco WhatsApp Business App:", echo.to, echo.text);
+
+    await setManualOverride({
+          whatsapp: echo.to,
+          active: true,
+          note: "Tomado desde WhatsApp Business App"
+    });
+
+    await appendConversation({
+          id: echo.id,
+          from: echo.to,
+          name: echo.name || "",
+          text: "",
+          reply: `[Humano WhatsApp Business] ${echo.text || `[${echo.type || "mensaje"} enviado]`}`
+    });
+
+    await notifyHumanTakeoverFromBusinessApp(echo);
+}
+
+function extractBusinessEchoes(payload = {}) {
+    const echoes = [];
+
+    for (const entry of payload.entry || []) {
+          for (const change of entry.changes || []) {
+                  const field = (change.field || "").toString().toLowerCase();
+                  const value = change.value || {};
+                  const isEchoField = field.includes("echo");
+                  const echoMessages = [
+                            ...asArray(value.smb_message_echoes),
+                            ...asArray(value.message_echoes),
+                            ...(isEchoField ? asArray(value.messages) : [])
+                          ];
+
+                  for (const message of echoMessages) {
+                            const customerWhatsapp = normalizeWhatsapp(
+                                        message.to ||
+                                        message.recipient_id ||
+                                        message.customer_phone_number ||
+                                        message.customer_wa_id ||
+                                        message.contact?.wa_id
+                                      );
+
+                            if (!customerWhatsapp) continue;
+
+                            const text = extractMessageText(message);
+                            echoes.push({
+                                        id: message.id || message.message_id || message.wamid || `business_echo_${Date.now()}_${customerWhatsapp}`,
+                                        to: customerWhatsapp,
+                                        type: normalizeEchoType(message.type),
+                                        text,
+                                        name: message.contact?.profile?.name || ""
+                            });
+                  }
+          }
+    }
+
+    return echoes;
+}
+
+function extractMessageText(message = {}) {
+    if (message.text?.body) return message.text.body.trim();
+    if (typeof message.text === "string") return message.text.trim();
+    if (message.caption) return message.caption.trim();
+
+    const type = normalizeEchoType(message.type);
+    const media = message[type] || message[message.type] || {};
+    if (media.caption) return media.caption.trim();
+
+    return "";
+}
+
+function normalizeEchoType(type = "") {
+    return type.toString().replace(/^smb_message_echoes\./, "").replace(/^message_echoes\./, "") || "text";
+}
+
+function asArray(value) {
+    if (Array.isArray(value)) return value;
+    if (value && typeof value === "object") return [value];
+    return [];
+}
 
 function extractMessages(payload = {}) {
   const messages = [];
@@ -1274,7 +1364,23 @@ async function notifyTelegram(order) {
   }
 }
 
-async function notifyManualOverrideMessage(message) {
+async function notifyHumanTakeoverFromBusinessApp(echo) {
+    const text = [
+          "Atencion humana detectada desde WhatsApp Business App",
+          `WhatsApp: ${echo.to}`,
+          `Modo: manual`,
+          echo.text ? `Mensaje enviado: ${echo.text}` : `Tipo: ${echo.type || "mensaje"}`,
+          "El bot queda pausado para este cliente."
+        ].join("\n");
+
+    try {
+          await sendTelegramText(text, customerActionButtons(echo.to, "manual"));
+    } catch (error) {
+          console.error("Business app takeover notification failed:", error.response?.data || error.message);
+    }
+}
+
+  async function notifyManualOverrideMessage(message) {
   if (!config.telegramBotToken || !config.telegramChatId) return;
 
   const text = [
