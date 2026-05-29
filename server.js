@@ -650,7 +650,7 @@ async function handleTelegramCommand(text) {
     return;
   }
 
-  const aiMatch = text.match(/^\/?(?:ia|sugerir|asistente)(?:@\w+)?\s+(\+?\d[\d\s-]{6,})\s*:\s*([\s\S]+)/i);
+  const aiMatch = text.match(/^\/?(?:ia|sugerir|asistente)(?:@\w+)?\s+(\+?\d[\d\s-]{6,})(?:\s*:\s*|\s+)([\s\S]+)/i);
   if (aiMatch) {
     const to = normalizeWhatsapp(aiMatch[1]);
     const instruction = aiMatch[2].trim();
@@ -658,7 +658,7 @@ async function handleTelegramCommand(text) {
     return;
   }
 
-  const replyMatch = text.match(/^\/?(?:responder|enviar)(?:@\w+)?\s+(\+?\d[\d\s-]{6,})\s*:\s*([\s\S]+)/i);
+  const replyMatch = text.match(/^\/?(?:responder|enviar)(?:@\w+)?\s+(\+?\d[\d\s-]{6,})(?:\s*:\s*|\s+)([\s\S]+)/i);
   if (replyMatch) {
     const to = normalizeWhatsapp(replyMatch[1]);
     const message = replyMatch[2].trim();
