@@ -40,8 +40,9 @@ create table if not exists conversations (
   customer_id text references customers(id),
   customer_whatsapp text not null,
   customer_name text,
-  incoming_text text not null,
+  incoming_text text,
   assistant_reply text,
+  raw_type text default 'text',
   intent text,
   order_id text,
   created_at timestamptz default now()
