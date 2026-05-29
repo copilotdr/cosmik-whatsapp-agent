@@ -603,7 +603,7 @@ async function handleTelegramReplyToNotification(message = {}) {
 }
 
 async function handleTelegramCommand(text) {
-  const replyMatch = text.match(/^(?:responder|enviar)\s+(\+?\d[\d\s-]{6,})\s*:\s*([\s\S]+)/i);
+  const replyMatch = text.match(/^\/?(?:responder|enviar)(?:@\w+)?\s+(\+?\d[\d\s-]{6,})\s*:\s*([\s\S]+)/i);
   if (replyMatch) {
     const to = normalizeWhatsapp(replyMatch[1]);
     const message = replyMatch[2].trim();
@@ -611,7 +611,7 @@ async function handleTelegramCommand(text) {
     return;
   }
 
-  const pauseMatch = text.match(/^pausar\s+(\+?\d[\d\s-]{6,})/i);
+  const pauseMatch = text.match(/^\/?pausar(?:@\w+)?\s+(\+?\d[\d\s-]{6,})/i);
   if (pauseMatch) {
     const whatsapp = normalizeWhatsapp(pauseMatch[1]);
     await setManualOverride({ whatsapp, active: true, note: "Pausado desde Telegram" });
@@ -619,7 +619,7 @@ async function handleTelegramCommand(text) {
     return;
   }
 
-  const resumeMatch = text.match(/^(?:reactivar|activar)\s+(\+?\d[\d\s-]{6,})/i);
+  const resumeMatch = text.match(/^\/?(?:reactivar|activar)(?:@\w+)?\s+(\+?\d[\d\s-]{6,})/i);
   if (resumeMatch) {
     const whatsapp = normalizeWhatsapp(resumeMatch[1]);
     await setManualOverride({ whatsapp, active: false, note: "Reactivado desde Telegram" });
