@@ -57,6 +57,11 @@ GOOGLE_SHEETS_WEBHOOK_URL=https://script.google.com/macros/s/.../exec
 TELEGRAM_BOT_TOKEN=token-del-bot
 TELEGRAM_CHAT_ID=id-del-chat
 ADMIN_WHATSAPP_NUMBER=573001112233
+CHATWOOT_BASE_URL=https://chat.tudominio.com
+CHATWOOT_INBOX_IDENTIFIER=identificador-del-api-inbox
+CHATWOOT_ACCOUNT_ID=1
+CHATWOOT_API_ACCESS_TOKEN=token-de-perfil-chatwoot
+CHATWOOT_WEBHOOK_SECRET=secreto-del-webhook-chatwoot
 SUPABASE_URL=https://tu-proyecto.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=service-role-key
 ```
@@ -133,6 +138,7 @@ Ejecuta `docs/supabase-schema.sql` en el SQL Editor de Supabase. El bot usa esta
 - `conversations`: historial que da memoria real al agente.
 - `orders`: pedidos confirmados, fechas, pagos y estado operativo.
 - `manual_overrides`: clientes donde el bot queda pausado para atencion humana.
+- `chatwoot_threads`: enlace entre cada WhatsApp y su conversacion en Chatwoot.
 
 En Render son necesarias estas variables para activar Supabase:
 
@@ -142,6 +148,41 @@ SUPABASE_SERVICE_ROLE_KEY
 ```
 
 Usa la `service_role key` solo en Render, nunca en frontend publico.
+
+## Chatwoot como inbox humano
+
+La integracion recomendada es usar un inbox de tipo `API Channel` en Chatwoot. El webhook de Meta se mantiene apuntando a este servidor, y el servidor copia los mensajes hacia Chatwoot. Asi evitamos que Chatwoot y el bot compitan por el unico webhook de WhatsApp.
+
+Flujo:
+
+- Cliente escribe por WhatsApp.
+- El bot recibe el mensaje, lo guarda y lo copia a Chatwoot.
+- Si el bot esta activo, responde por WhatsApp y tambien copia su respuesta a Chatwoot.
+- Si un agente responde desde Chatwoot, Chatwoot llama `POST /chatwoot/webhook`.
+- El servidor envia esa respuesta al cliente por WhatsApp y pausa el bot para ese cliente.
+
+Variables necesarias:
+
+```text
+CHATWOOT_BASE_URL=https://chat.tudominio.com
+CHATWOOT_INBOX_IDENTIFIER=identificador-del-api-inbox
+CHATWOOT_WEBHOOK_SECRET=secreto-del-webhook
+```
+
+Para que las respuestas automaticas/manuales del bot tambien se vean como mensajes salientes en Chatwoot, agrega:
+
+```text
+CHATWOOT_ACCOUNT_ID=id-de-la-cuenta
+CHATWOOT_API_ACCESS_TOKEN=token-de-perfil-de-un-admin-o-agente
+```
+
+En Chatwoot configura un webhook de cuenta hacia:
+
+```text
+https://api.wearecosmik.com/chatwoot/webhook
+```
+
+Suscribelo al evento `message_created`.
 
 ## Modo manual
 
