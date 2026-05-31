@@ -1,6 +1,7 @@
 import express from "express";
 import axios from "axios";
 import OpenAI from "openai";
+import crypto from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 const config = {
@@ -20,6 +21,11 @@ const config = {
   telegramWebhookUrl:
     process.env.TELEGRAM_WEBHOOK_URL ||
     buildTelegramWebhookUrl(process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "https://api.wearecosmik.com"),
+  chatwootBaseUrl: process.env.CHATWOOT_BASE_URL?.replace(/\/$/, ""),
+  chatwootInboxIdentifier: process.env.CHATWOOT_INBOX_IDENTIFIER,
+  chatwootAccountId: process.env.CHATWOOT_ACCOUNT_ID,
+  chatwootApiAccessToken: process.env.CHATWOOT_API_ACCESS_TOKEN,
+  chatwootWebhookSecret: process.env.CHATWOOT_WEBHOOK_SECRET,
   adminWhatsappNumber: normalizeWhatsapp(process.env.ADMIN_WHATSAPP_NUMBER || ""),
   maxConversationTurns: Number(process.env.MAX_CONVERSATION_TURNS || 8),
   fallbackReply:
@@ -31,6 +37,7 @@ const app = express();
 const openai = new OpenAI({ apiKey: config.openaiApiKey });
 const processedMessageIds = new Set();
 const memoryConversations = new Map();
+const chatwootThreadMemory = new Map();
 
 const knowledgeBase = {
   brand: {
@@ -112,7 +119,12 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({
+  limit: "1mb",
+  verify: (req, _res, buffer) => {
+    req.rawBody = buffer.toString("utf8");
+  }
+}));
 app.use(express.static("public"));
 
 app.get("/", (_req, res) => {
@@ -344,23 +356,39 @@ app.post("/telegram/webhook", async (req, res) => {
   }
 });
 
+app.post("/chatwoot/webhook", async (req, res) => {
+  if (!verifyChatwootWebhook(req)) {
+    res.sendStatus(401);
+    return;
+  }
+
+  res.status(200).json({ ok: true });
+
+  try {
+    await handleChatwootWebhook(req.body || {});
+  } catch (error) {
+    console.error("Chatwoot webhook handling failed:", error.response?.data || error.message);
+  }
+});
+
 app.post("/webhook", async (req, res) => {
   const messages = extractMessages(req.body);
-    const businessEchoes = extractBusinessEchoes(req.body);
+  const businessEchoes = extractBusinessEchoes(req.body);
   res.status(200).json({ ok: true, received: messages.length, echoes: businessEchoes.length });
 
-    for (const echo of businessEchoes) {
-          if (processedMessageIds.has(echo.id)) continue;
-          processedMessageIds.add(echo.id);
+  for (const echo of businessEchoes) {
+    if (processedMessageIds.has(echo.id)) continue;
+    processedMessageIds.add(echo.id);
 
-          await handleBusinessAppEcho(echo);
-    }
+    await handleBusinessAppEcho(echo);
+  }
 
   for (const message of messages) {
     if (processedMessageIds.has(message.id)) continue;
     processedMessageIds.add(message.id);
 
     console.log("Mensaje recibido:", message.from, message.text);
+    await mirrorIncomingToChatwoot(message);
 
     if (await isManualOverrideActive(message.from)) {
       await appendConversation({
@@ -388,6 +416,7 @@ app.post("/webhook", async (req, res) => {
     try {
       await sendWhatsAppText(message.from, reply);
       await appendConversation({ ...message, reply });
+      await mirrorOutgoingToChatwoot(message.from, reply, "cosmik_bot");
       await captureConfirmedOrder(message, reply, history);
       console.log(`Respuesta enviada a ${message.from}`);
     } catch (error) {
@@ -397,85 +426,23 @@ app.post("/webhook", async (req, res) => {
 });
 
 async function handleBusinessAppEcho(echo) {
-    console.log("Eco WhatsApp Business App:", echo.to, echo.text);
+  console.log("Eco WhatsApp Business App:", echo.to, echo.text);
 
-    await setManualOverride({
-          whatsapp: echo.to,
-          active: true,
-          note: "Tomado desde WhatsApp Business App"
-    });
+  await setManualOverride({
+    whatsapp: echo.to,
+    active: true,
+    note: "Tomado desde WhatsApp Business App"
+  });
 
-    await appendConversation({
-          id: echo.id,
-          from: echo.to,
-          name: echo.name || "",
-          text: "",
-          reply: `[Humano WhatsApp Business] ${echo.text || `[${echo.type || "mensaje"} enviado]`}`
-    });
+  await appendConversation({
+    id: echo.id,
+    from: echo.to,
+    name: echo.name || "",
+    text: "",
+    reply: `[Humano WhatsApp Business] ${echo.text || `[${echo.type || "mensaje"} enviado]`}`
+  });
 
-    await notifyHumanTakeoverFromBusinessApp(echo);
-}
-
-function extractBusinessEchoes(payload = {}) {
-    const echoes = [];
-
-    for (const entry of payload.entry || []) {
-          for (const change of entry.changes || []) {
-                  const field = (change.field || "").toString().toLowerCase();
-                  const value = change.value || {};
-                  const isEchoField = field.includes("echo");
-                  const echoMessages = [
-                            ...asArray(value.smb_message_echoes),
-                            ...asArray(value.message_echoes),
-                            ...(isEchoField ? asArray(value.messages) : [])
-                          ];
-
-                  for (const message of echoMessages) {
-                            const customerWhatsapp = normalizeWhatsapp(
-                                        message.to ||
-                                        message.recipient_id ||
-                                        message.customer_phone_number ||
-                                        message.customer_wa_id ||
-                                        message.contact?.wa_id
-                                      );
-
-                            if (!customerWhatsapp) continue;
-
-                            const text = extractMessageText(message);
-                            echoes.push({
-                                        id: message.id || message.message_id || message.wamid || `business_echo_${Date.now()}_${customerWhatsapp}`,
-                                        to: customerWhatsapp,
-                                        type: normalizeEchoType(message.type),
-                                        text,
-                                        name: message.contact?.profile?.name || ""
-                            });
-                  }
-          }
-    }
-
-    return echoes;
-}
-
-function extractMessageText(message = {}) {
-    if (message.text?.body) return message.text.body.trim();
-    if (typeof message.text === "string") return message.text.trim();
-    if (message.caption) return message.caption.trim();
-
-    const type = normalizeEchoType(message.type);
-    const media = message[type] || message[message.type] || {};
-    if (media.caption) return media.caption.trim();
-
-    return "";
-}
-
-function normalizeEchoType(type = "") {
-    return type.toString().replace(/^smb_message_echoes\./, "").replace(/^message_echoes\./, "") || "text";
-}
-
-function asArray(value) {
-    if (Array.isArray(value)) return value;
-    if (value && typeof value === "object") return [value];
-    return [];
+  await notifyHumanTakeoverFromBusinessApp(echo);
 }
 
 function extractMessages(payload = {}) {
@@ -521,6 +488,68 @@ function extractMessages(payload = {}) {
   }
 
   return messages;
+}
+
+function extractBusinessEchoes(payload = {}) {
+  const echoes = [];
+
+  for (const entry of payload.entry || []) {
+    for (const change of entry.changes || []) {
+      const field = (change.field || "").toString().toLowerCase();
+      const value = change.value || {};
+      const isEchoField = field.includes("echo");
+      const echoMessages = [
+        ...asArray(value.smb_message_echoes),
+        ...asArray(value.message_echoes),
+        ...(isEchoField ? asArray(value.messages) : [])
+      ];
+
+      for (const message of echoMessages) {
+        const customerWhatsapp = normalizeWhatsapp(
+          message.to ||
+          message.recipient_id ||
+          message.customer_phone_number ||
+          message.customer_wa_id ||
+          message.contact?.wa_id
+        );
+
+        if (!customerWhatsapp) continue;
+
+        const text = extractMessageText(message);
+        echoes.push({
+          id: message.id || message.message_id || message.wamid || `business_echo_${Date.now()}_${customerWhatsapp}`,
+          to: customerWhatsapp,
+          type: normalizeEchoType(message.type),
+          text,
+          name: message.contact?.profile?.name || ""
+        });
+      }
+    }
+  }
+
+  return echoes;
+}
+
+function extractMessageText(message = {}) {
+  if (message.text?.body) return message.text.body.trim();
+  if (typeof message.text === "string") return message.text.trim();
+  if (message.caption) return message.caption.trim();
+
+  const type = normalizeEchoType(message.type);
+  const media = message[type] || message[message.type] || {};
+  if (media.caption) return media.caption.trim();
+
+  return "";
+}
+
+function normalizeEchoType(type = "") {
+  return type.toString().replace(/^smb_message_echoes\./, "").replace(/^message_echoes\./, "") || "text";
+}
+
+function asArray(value) {
+  if (Array.isArray(value)) return value;
+  if (value && typeof value === "object") return [value];
+  return [];
 }
 
 async function buildReply(message, history = []) {
@@ -740,7 +769,7 @@ async function handleTelegramCommand(text) {
     return;
   }
 
-  const aiMatch = text.match(/^\/?(?:ia|sugerir|asistente)(?:@\w+)?\s+(\+?\d[\d\s-]{6,})(?:\s*:\s*|\s+)([\s\S]+)/i);
+  const aiMatch = text.match(/^\/?(?:ia|sugerir|asistente)(?:@\w+)?\s+(\+?\d[\d-]{6,})(?:\s*:\s*|\s+)([\s\S]+)/i);
   if (aiMatch) {
     const to = normalizeWhatsapp(aiMatch[1]);
     const instruction = aiMatch[2].trim();
@@ -748,7 +777,7 @@ async function handleTelegramCommand(text) {
     return;
   }
 
-  const replyMatch = text.match(/^\/?(?:responder|enviar)(?:@\w+)?\s+(\+?\d[\d\s-]{6,})(?:\s*:\s*|\s+)([\s\S]+)/i);
+  const replyMatch = text.match(/^\/?(?:responder|enviar)(?:@\w+)?\s+(\+?\d[\d-]{6,})(?:\s*:\s*|\s+)([\s\S]+)/i);
   if (replyMatch) {
     const to = normalizeWhatsapp(replyMatch[1]);
     const message = replyMatch[2].trim();
@@ -796,6 +825,7 @@ async function sendManualWhatsappFromTelegram(to, text) {
     text: "",
     reply: `[Manual Telegram] ${text}`
   });
+  await mirrorOutgoingToChatwoot(to, text, "telegram_manual");
   await sendTelegramText(`Enviado a ${to}:\n${text}`);
 }
 
@@ -811,20 +841,21 @@ async function sendAiDirectedReplyFromTelegram(to, instruction) {
   await setManualOverride({
     whatsapp: to,
     active: true,
-    note: "Respuesta con IA dirigida desde Telegram"
+    note: "Respuesta asistida enviada desde Telegram"
   });
   await sendWhatsAppText(to, reply);
   await appendConversation({
     id: `telegram_ai_${Date.now()}_${to}`,
     from: to,
     name: "",
-    text: `[Instruccion Telegram] ${instruction}`,
+    text: `[Instruccion interna] ${instruction}`,
     reply: `[IA Telegram] ${reply}`
   });
+  await mirrorOutgoingToChatwoot(to, reply, "telegram_ai");
   await sendTelegramText(`Respuesta IA enviada a ${to}:\n${reply}`);
 }
 
-async function buildDirectedReply(to, instruction, history = []) {
+async function buildDirectedReply(customerWhatsapp, instruction, history = []) {
   try {
     const completion = await openai.chat.completions.create({
       model: config.openaiModel,
@@ -834,22 +865,24 @@ async function buildDirectedReply(to, instruction, history = []) {
         {
           role: "user",
           content: [
-            `El equipo de Cosmik quiere responder manualmente al cliente ${to}.`,
-            "Redacta una respuesta breve para WhatsApp siguiendo esta instruccion:",
-            instruction
+            "INSTRUCCION INTERNA DEL EQUIPO COSMIK, NO LA COPIES LITERAL.",
+            `Cliente WhatsApp: ${customerWhatsapp}`,
+            `Instruccion: ${instruction}`,
+            "Redacta solo el mensaje final que se enviara al cliente por WhatsApp.",
+            "Debe sonar natural, claro, corto y comercial."
           ].join("\n")
         }
       ],
-      max_completion_tokens: 300
+      max_completion_tokens: 350
     });
 
     return (
       completion.choices?.[0]?.message?.content?.trim() ||
-      "Gracias por la info. Ya lo revisamos y te confirmamos enseguida."
+      "Claro, con gusto te ayudamos con esa referencia. El equipo la revisa y te confirma los detalles."
     );
   } catch (error) {
-    console.error("OpenAI directed reply failed:", error.response?.data || error.message);
-    return "Gracias por la info. Ya lo revisamos y te confirmamos enseguida.";
+    console.error("Directed Telegram reply failed:", error.response?.data || error.message);
+    return config.fallbackReply;
   }
 }
 
@@ -875,6 +908,7 @@ async function sendManualMediaFromTelegram(to, media, caption = "") {
     text: "",
     reply: `[Manual Telegram archivo] ${caption || media.filename || media.type}`
   });
+  await mirrorOutgoingToChatwoot(to, caption || `[Archivo enviado desde Telegram: ${media.filename || media.type}]`, "telegram_media");
   await sendTelegramText(`Archivo enviado a ${to}${caption ? `:\n${caption}` : "."}`);
 }
 
@@ -891,6 +925,8 @@ async function answerTelegramCallback(callbackQueryId, text) {
 }
 
 async function captureConfirmedOrder(message, reply, history = []) {
+  if (!isOrderConfirmationCandidate(message.text)) return;
+
   const analysis = await analyzeOrder(message, reply, history);
   if (!analysis?.confirmed) return;
 
@@ -911,48 +947,42 @@ async function captureConfirmedOrder(message, reply, history = []) {
 }
 
 async function analyzeOrder(message, reply, history = []) {
-  if (!isOrderConfirmationCandidate(`${message.text}\n${reply}`)) {
-    return { confirmed: false };
-  }
-
   try {
     const completion = await openai.chat.completions.create({
       model: config.openaiModel,
+      response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
-          content: `Extrae datos de pedidos Cosmik. Responde SOLO JSON valido.
-Campos:
-confirmed boolean,
-product string,
-quantity string,
-color string,
-scent string,
-customerName string,
-phone string,
-address string,
-deliveryDate string,
-deliveryDateIso string YYYY-MM-DD si puedes inferirla, si no null,
-paymentMethod string,
-personalMessage string,
-summary string.
-Marca confirmed=true solo si el cliente ya confirmo el pedido o la respuesta del asistente dice que esta confirmado.`
+          content: [
+            "Analiza si el cliente acaba de confirmar un pedido de Cosmik.",
+            "Devuelve solo JSON valido.",
+            "Campos: confirmed boolean, product, quantity, color, scent, customerName, phone, address, deliveryDate, deliveryDateIso, paymentMethod, personalMessage, summary.",
+            "confirmed solo puede ser true si el mensaje actual del cliente confirma claramente el pedido o dice que quiere cerrar/comprar/ordenar con datos suficientes.",
+            "No marques confirmed=true por informacion vieja del historial ni por una respuesta del asistente.",
+            "deliveryDate debe conservar la forma natural que dijo el cliente.",
+            "deliveryDateIso debe ser YYYY-MM-DD si puedes inferir una fecha exacta usando la fecha actual de Bogota; si no puedes, string vacio.",
+            "Si no hay confirmacion clara del pedido, confirmed debe ser false.",
+            "No inventes campos faltantes; usa strings vacios."
+          ].join(" ")
         },
-        ...historyToOpenAiMessages(history),
-        { role: "user", content: `Mensaje cliente: ${message.text}\nRespuesta bot: ${reply}` }
+        {
+          role: "user",
+          content: JSON.stringify({
+            currentDateBogota: getBogotaDateString(),
+            recentConversation: history,
+            customer: message,
+            assistantReply: reply
+          })
+        }
       ],
-      response_format: { type: "json_object" },
-      max_completion_tokens: 350
+      max_completion_tokens: 450
     });
 
-    const parsed = JSON.parse(completion.choices?.[0]?.message?.content || "{}");
-    return {
-      ...parsed,
-      deliveryDateIso: parsed.deliveryDateIso || parseDate(parsed.deliveryDate)
-    };
+    return JSON.parse(completion.choices?.[0]?.message?.content || "{}");
   } catch (error) {
     console.error("Order analysis failed:", error.response?.data || error.message);
-    return { confirmed: false };
+    return null;
   }
 }
 
@@ -1057,6 +1087,8 @@ async function appendConversation(event) {
 
     await supabaseUpsert("conversations", {
       id: event.id || `${Date.now()}_${event.from}`,
+      whatsapp_message_id: event.id || null,
+      customer_id: event.from,
       customer_whatsapp: event.from,
       customer_name: event.name || null,
       incoming_text: event.text || null,
@@ -1065,7 +1097,7 @@ async function appendConversation(event) {
       created_at: now
     });
   } catch (error) {
-    console.error("Conversation save failed:", error.response?.data || error.message);
+    console.error("Conversation persistence failed:", error.response?.data || error.message);
   }
 }
 
@@ -1074,81 +1106,65 @@ async function appendOrder(order) {
 
   try {
     const now = new Date().toISOString();
-    const estimatedValue = estimateOrderValue(order);
+    await supabaseUpsert("customers", {
+      id: order.from,
+      whatsapp: order.from,
+      name: order.customerName || null,
+      last_seen_at: now,
+      updated_at: now
+    });
+
     await supabaseUpsert("orders", {
-      id: order.id || `${Date.now()}_${order.from}`,
+      id: order.id || `order_${Date.now()}`,
+      whatsapp_message_id: order.id || null,
+      customer_id: order.from,
       customer_whatsapp: order.from,
       customer_name: order.customerName || null,
-      phone: order.phone || order.from || null,
+      status: "nuevo",
+      priority: "normal",
       product: order.product || null,
-      quantity: order.quantity || null,
+      quantity: parseInt(order.quantity, 10) || null,
       color: order.color || null,
       scent: order.scent || null,
-      address: order.address || null,
-      delivery_date: order.deliveryDate || null,
-      delivery_date_iso: order.deliveryDateIso || parseDate(order.deliveryDate),
-      payment_method: order.paymentMethod || null,
       personal_message: order.personalMessage || null,
+      delivery_address: order.address || null,
+      desired_delivery_date: parseDate(order.deliveryDateIso || order.deliveryDate),
+      payment_method: order.paymentMethod || null,
+      estimated_value_cop: estimateOrderValue(order),
       summary: order.summary || null,
-      estimated_value_cop: estimatedValue,
-      status: requiresPaymentLink(order.paymentMethod) ? "pendiente_link_pago" : "confirmado",
-      priority: requiresPaymentLink(order.paymentMethod) ? "alta" : "normal",
-      source_text: order.sourceText || null,
-      created_at: now,
       updated_at: now
     });
   } catch (error) {
-    console.error("Order save failed:", error.response?.data || error.message);
+    console.error("Order persistence failed:", error.response?.data || error.message);
   }
 }
 
 async function readDashboardData() {
-  if (!supabaseEnabled()) {
-    return { orders: [], conversations: [], manualOverrides: [] };
-  }
+  if (!supabaseEnabled()) return { orders: [], conversations: [] };
 
-  const [orders, conversations, statuses] = await Promise.all([
+  const [orders, conversations, conversationStatuses] = await Promise.all([
     supabaseGet("orders", { select: "*", order: "created_at.desc", limit: "250" }),
     supabaseGet("conversations", { select: "*", order: "created_at.desc", limit: "250" }),
     supabaseGet("conversation_statuses", { select: "*", order: "updated_at.desc", limit: "500" })
   ]);
-
-  const statusByWhatsapp = new Map(statuses.map((row) => [row.customer_whatsapp, row]));
-  const activeConversations = conversations.filter(
-    (row) => statusByWhatsapp.get(row.customer_whatsapp)?.status !== "archivado"
+  const statusByWhatsapp = new Map(
+    conversationStatuses.map((row) => [row.customer_whatsapp, row])
   );
 
   return {
     orders: orders.map((row) => ({
-      id: row.id,
-      customerWhatsapp: row.customer_whatsapp,
-      customerName: row.customer_name,
-      phone: row.phone,
-      product: row.product,
-      quantity: row.quantity,
-      color: row.color,
-      scent: row.scent,
-      address: row.address,
-      deliveryDate: row.delivery_date,
-      deliveryDateIso: row.delivery_date_iso,
-      paymentMethod: row.payment_method,
-      personalMessage: row.personal_message,
-      summary: row.summary,
-      estimatedValueCop: row.estimated_value_cop,
-      status: row.status,
-      priority: row.priority,
-      teamNotes: row.team_notes,
-      checkoutUrl: row.checkout_url,
+      ...row,
       createdAt: row.created_at,
-      updatedAt: row.updated_at
-    })),
-    conversations: activeConversations.map((row) => ({
-      id: row.id,
-      customerWhatsapp: row.customer_whatsapp,
       customerName: row.customer_name,
-      incomingText: row.incoming_text,
-      assistantReply: row.assistant_reply,
-      rawType: row.raw_type,
+      deliveryDate: row.desired_delivery_date,
+      paymentMethod: row.payment_method
+    })),
+    conversations: conversations.map((row) => ({
+      ...row,
+      from: row.customer_whatsapp,
+      name: row.customer_name,
+      text: row.incoming_text,
+      reply: row.assistant_reply,
       createdAt: row.created_at,
       status: statusByWhatsapp.get(row.customer_whatsapp)?.status || "activo",
       statusReason: statusByWhatsapp.get(row.customer_whatsapp)?.reason || ""
@@ -1164,6 +1180,51 @@ async function readManualOverrides() {
     order: "updated_at.desc",
     limit: "250"
   });
+}
+
+async function getChatwootThread(customerWhatsapp) {
+  const cached = chatwootThreadMemory.get(customerWhatsapp);
+  if (cached) return cached;
+
+  if (!supabaseEnabled()) return null;
+
+  try {
+    const rows = await supabaseGet("chatwoot_threads", {
+      select: "*",
+      customer_whatsapp: `eq.${customerWhatsapp}`,
+      limit: "1"
+    });
+    const thread = rows[0]
+      ? {
+          customerWhatsapp: rows[0].customer_whatsapp,
+          contactIdentifier: rows[0].contact_identifier,
+          conversationId: rows[0].conversation_id
+        }
+      : null;
+
+    if (thread) chatwootThreadMemory.set(customerWhatsapp, thread);
+    return thread;
+  } catch (error) {
+    console.error("Chatwoot thread read failed:", error.response?.data || error.message);
+    return null;
+  }
+}
+
+async function saveChatwootThread(thread) {
+  chatwootThreadMemory.set(thread.customerWhatsapp, thread);
+  if (!supabaseEnabled()) return;
+
+  try {
+    const now = new Date().toISOString();
+    await supabaseUpsert("chatwoot_threads", {
+      customer_whatsapp: thread.customerWhatsapp,
+      contact_identifier: thread.contactIdentifier,
+      conversation_id: String(thread.conversationId),
+      updated_at: now
+    });
+  } catch (error) {
+    console.error("Chatwoot thread save failed:", error.response?.data || error.message);
+  }
 }
 
 async function setManualOverride({ whatsapp, active, note }) {
@@ -1307,6 +1368,209 @@ function buildTelegramWebhookUrl(baseUrl = "") {
   return normalized ? `${normalized}/telegram/webhook` : "";
 }
 
+function chatwootEnabled() {
+  return Boolean(config.chatwootBaseUrl && config.chatwootInboxIdentifier);
+}
+
+function chatwootAgentApiEnabled() {
+  return Boolean(chatwootEnabled() && config.chatwootAccountId && config.chatwootApiAccessToken);
+}
+
+async function mirrorIncomingToChatwoot(message) {
+  if (!chatwootEnabled() || !message?.from) return;
+
+  try {
+    const thread = await ensureChatwootThread(message);
+    if (!thread?.conversationId || !thread?.contactIdentifier) return;
+
+    await axios.post(
+      `${config.chatwootBaseUrl}/public/api/v1/inboxes/${encodeURIComponent(config.chatwootInboxIdentifier)}/contacts/${encodeURIComponent(thread.contactIdentifier)}/conversations/${encodeURIComponent(thread.conversationId)}/messages`,
+      {
+        content: message.text || `[Mensaje recibido: ${message.type || "sin texto"}]`,
+        echo_id: message.id || `wa_${Date.now()}_${message.from}`
+      },
+      { headers: { "Content-Type": "application/json" } }
+    );
+  } catch (error) {
+    console.error("Chatwoot incoming mirror failed:", error.response?.data || error.message);
+  }
+}
+
+async function mirrorOutgoingToChatwoot(customerWhatsapp, content, origin = "cosmik") {
+  if (!chatwootAgentApiEnabled() || !customerWhatsapp || !content) return;
+
+  try {
+    const thread = await getChatwootThread(customerWhatsapp);
+    if (!thread?.conversationId) return;
+
+    await axios.post(
+      `${config.chatwootBaseUrl}/api/v1/accounts/${config.chatwootAccountId}/conversations/${thread.conversationId}/messages`,
+      {
+        content,
+        message_type: "outgoing",
+        private: false,
+        content_type: "text",
+        content_attributes: {
+          source: "cosmik_bridge",
+          origin
+        }
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          api_access_token: config.chatwootApiAccessToken
+        }
+      }
+    );
+  } catch (error) {
+    console.error("Chatwoot outgoing mirror failed:", error.response?.data || error.message);
+  }
+}
+
+async function ensureChatwootThread(message) {
+  const customerWhatsapp = normalizeWhatsapp(message.from);
+  const existing = await getChatwootThread(customerWhatsapp);
+  if (existing) return existing;
+
+  const contact = await createChatwootContact(message);
+  const contactIdentifier = contact.source_id || contact.sourceId || contact.identifier || customerWhatsapp;
+  const conversation = await createChatwootConversation(contactIdentifier, customerWhatsapp);
+  const thread = {
+    customerWhatsapp,
+    contactIdentifier,
+    conversationId: conversation.id
+  };
+
+  await saveChatwootThread(thread);
+  return thread;
+}
+
+async function createChatwootContact(message) {
+  const customerWhatsapp = normalizeWhatsapp(message.from);
+
+  try {
+    const response = await axios.post(
+      `${config.chatwootBaseUrl}/public/api/v1/inboxes/${encodeURIComponent(config.chatwootInboxIdentifier)}/contacts`,
+      {
+        identifier: customerWhatsapp,
+        name: message.name || customerWhatsapp,
+        phone_number: `+${customerWhatsapp}`,
+        custom_attributes: {
+          source: "whatsapp_cloud_api",
+          cosmik_customer: true
+        }
+      },
+      { headers: { "Content-Type": "application/json" } }
+    );
+
+    return response.data || {};
+  } catch (error) {
+    const status = error.response?.status;
+    if (status === 422 || status === 409) {
+      return { source_id: customerWhatsapp, identifier: customerWhatsapp };
+    }
+    throw error;
+  }
+}
+
+async function createChatwootConversation(contactIdentifier, customerWhatsapp) {
+  const response = await axios.post(
+    `${config.chatwootBaseUrl}/public/api/v1/inboxes/${encodeURIComponent(config.chatwootInboxIdentifier)}/contacts/${encodeURIComponent(contactIdentifier)}/conversations`,
+    {
+      custom_attributes: {
+        whatsapp: customerWhatsapp,
+        source: "cosmik_whatsapp_agent"
+      }
+    },
+    { headers: { "Content-Type": "application/json" } }
+  );
+
+  return response.data || {};
+}
+
+function verifyChatwootWebhook(req) {
+  if (!config.chatwootWebhookSecret) return true;
+
+  const signature = req.get("x-chatwoot-signature") || "";
+  const timestamp = req.get("x-chatwoot-timestamp") || "";
+  if (!signature || !timestamp) return false;
+
+  const body = req.rawBody || JSON.stringify(req.body || {});
+  const expected = `sha256=${crypto
+    .createHmac("sha256", config.chatwootWebhookSecret)
+    .update(`${timestamp}.${body}`)
+    .digest("hex")}`;
+
+  return safeCompare(signature, expected);
+}
+
+function safeCompare(value, expected) {
+  const valueBuffer = Buffer.from(value);
+  const expectedBuffer = Buffer.from(expected);
+  return valueBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(valueBuffer, expectedBuffer);
+}
+
+async function handleChatwootWebhook(payload = {}) {
+  if (payload.event !== "message_created") return;
+  if (!isChatwootAgentOutgoingMessage(payload)) return;
+  if (payload.content_attributes?.source === "cosmik_bridge") return;
+
+  const whatsapp = extractWhatsappFromChatwootPayload(payload);
+  const content = payload.content?.toString().trim();
+  if (!whatsapp || !content) return;
+
+  await setManualOverride({
+    whatsapp,
+    active: true,
+    note: "Tomado desde Chatwoot"
+  });
+  await sendWhatsAppText(whatsapp, content);
+  await appendConversation({
+    id: `chatwoot_${payload.id || Date.now()}_${whatsapp}`,
+    from: whatsapp,
+    name: chatwootContactName(payload),
+    type: "chatwoot_outgoing",
+    text: "",
+    reply: `[Manual Chatwoot] ${content}`
+  });
+
+  console.log(`Respuesta de Chatwoot enviada a ${whatsapp}`);
+}
+
+function isChatwootAgentOutgoingMessage(payload = {}) {
+  if (payload.private === true) return false;
+  const type = payload.message_type;
+  return type === "outgoing" || type === 1 || type === "1";
+}
+
+function extractWhatsappFromChatwootPayload(payload = {}) {
+  const candidates = [
+    payload.conversation?.contact_inbox?.source_id,
+    payload.conversation?.meta?.sender?.phone_number,
+    payload.conversation?.meta?.sender?.identifier,
+    payload.contact?.phone_number,
+    payload.contact?.identifier,
+    payload.sender?.phone_number,
+    payload.sender?.identifier
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = normalizeWhatsapp(candidate || "");
+    if (normalized.length >= 7) return normalized;
+  }
+
+  return "";
+}
+
+function chatwootContactName(payload = {}) {
+  return (
+    payload.conversation?.meta?.sender?.name ||
+    payload.contact?.name ||
+    payload.sender?.name ||
+    ""
+  );
+}
+
 async function notifyIncomingMessage(message, mode = "auto") {
   const text = [
     message.mediaId
@@ -1365,22 +1629,22 @@ async function notifyTelegram(order) {
 }
 
 async function notifyHumanTakeoverFromBusinessApp(echo) {
-    const text = [
-          "Atencion humana detectada desde WhatsApp Business App",
-          `WhatsApp: ${echo.to}`,
-          `Modo: manual`,
-          echo.text ? `Mensaje enviado: ${echo.text}` : `Tipo: ${echo.type || "mensaje"}`,
-          "El bot queda pausado para este cliente."
-        ].join("\n");
+  const text = [
+    "Atencion humana detectada desde WhatsApp Business App",
+    `WhatsApp: ${echo.to}`,
+    `Modo: manual`,
+    echo.text ? `Mensaje enviado: ${echo.text}` : `Tipo: ${echo.type || "mensaje"}`,
+    "El bot queda pausado para este cliente."
+  ].join("\n");
 
-    try {
-          await sendTelegramText(text, customerActionButtons(echo.to, "manual"));
-    } catch (error) {
-          console.error("Business app takeover notification failed:", error.response?.data || error.message);
-    }
+  try {
+    await sendTelegramText(text, customerActionButtons(echo.to, "manual"));
+  } catch (error) {
+    console.error("Business app takeover notification failed:", error.response?.data || error.message);
+  }
 }
 
-  async function notifyManualOverrideMessage(message) {
+async function notifyManualOverrideMessage(message) {
   if (!config.telegramBotToken || !config.telegramChatId) return;
 
   const text = [
