@@ -83,10 +83,29 @@ create table if not exists manual_overrides (
   updated_at timestamptz default now()
 );
 
+create table if not exists conversation_statuses (
+  customer_whatsapp text primary key,
+  status text default 'activo',
+  reason text,
+  archived_at timestamptz,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create table if not exists chatwoot_threads (
+  customer_whatsapp text primary key,
+  contact_identifier text not null,
+  conversation_id text not null,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
 create index if not exists idx_orders_status on orders(status);
 create index if not exists idx_orders_delivery_date on orders(desired_delivery_date);
 create index if not exists idx_conversations_customer_whatsapp on conversations(customer_whatsapp);
 create index if not exists idx_manual_overrides_active on manual_overrides(active);
+create index if not exists idx_conversation_statuses_status on conversation_statuses(status);
+create index if not exists idx_chatwoot_threads_conversation_id on chatwoot_threads(conversation_id);
 
 do $$
 begin
@@ -108,6 +127,8 @@ grant select, insert, update, delete on products to service_role;
 grant select, insert, update, delete on conversations to service_role;
 grant select, insert, update, delete on orders to service_role;
 grant select, insert, update, delete on manual_overrides to service_role;
+grant select, insert, update, delete on conversation_statuses to service_role;
+grant select, insert, update, delete on chatwoot_threads to service_role;
 grant usage, select on all sequences in schema public to service_role;
 
 alter default privileges in schema public
