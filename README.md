@@ -179,7 +179,7 @@ CHATWOOT_API_ACCESS_TOKEN=token-de-perfil-de-un-admin-o-agente
 En Chatwoot configura un webhook de cuenta hacia:
 
 ```text
-https://api.wearecosmik.com/chatwoot/webhook
+https://api.wearecosmik.com/chatwoot/webhook?token=CHATWOOT_WEBHOOK_SECRET
 ```
 
 Suscribelo al evento `message_created`.
