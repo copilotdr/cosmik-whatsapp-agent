@@ -27,6 +27,7 @@ const config = {
   chatwootApiAccessToken: process.env.CHATWOOT_API_ACCESS_TOKEN,
   chatwootWebhookSecret: process.env.CHATWOOT_WEBHOOK_SECRET,
   adminWhatsappNumber: normalizeWhatsapp(process.env.ADMIN_WHATSAPP_NUMBER || ""),
+  botGlobalPaused: parseBoolean(process.env.BOT_GLOBAL_PAUSED || process.env.BOT_PAUSED),
   maxConversationTurns: Number(process.env.MAX_CONVERSATION_TURNS || 8),
   fallbackReply:
     process.env.FALLBACK_REPLY ||
@@ -390,13 +391,15 @@ app.post("/webhook", async (req, res) => {
     console.log("Mensaje recibido:", message.from, message.text);
     await mirrorIncomingToChatwoot(message);
 
-    if (await isManualOverrideActive(message.from)) {
+    if (isGlobalBotPaused() || await isManualOverrideActive(message.from)) {
       await appendConversation({
         ...message,
-        reply: "[Modo manual activo: el bot no respondio automaticamente.]"
+        reply: isGlobalBotPaused()
+          ? "[Bot pausado globalmente: no respondio automaticamente.]"
+          : "[Modo manual activo: el bot no respondio automaticamente.]"
       });
       await notifyIncomingMessage(message, "manual");
-      console.log(`Modo manual activo para ${message.from}; no se envio respuesta automatica.`);
+      console.log(`${isGlobalBotPaused() ? "Bot pausado globalmente" : "Modo manual activo"} para ${message.from}; no se envio respuesta automatica.`);
       continue;
     }
 
@@ -1361,6 +1364,16 @@ function isAuthorizedAdmin(req) {
 
 function normalizeWhatsapp(value = "") {
   return value.toString().replace(/\D/g, "");
+}
+
+function parseBoolean(value = "") {
+  return ["1", "true", "yes", "si", "sí", "on"].includes(
+    value.toString().trim().toLowerCase()
+  );
+}
+
+function isGlobalBotPaused() {
+  return config.botGlobalPaused === true;
 }
 
 function buildTelegramWebhookUrl(baseUrl = "") {
