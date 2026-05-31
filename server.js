@@ -1491,6 +1491,9 @@ async function createChatwootConversation(contactIdentifier, customerWhatsapp) {
 function verifyChatwootWebhook(req) {
   if (!config.chatwootWebhookSecret) return true;
 
+  const token = req.query.token || req.get("x-chatwoot-webhook-secret");
+  if (token && safeCompare(token.toString(), config.chatwootWebhookSecret)) return true;
+
   const signature = req.get("x-chatwoot-signature") || "";
   const timestamp = req.get("x-chatwoot-timestamp") || "";
   if (!signature || !timestamp) return false;
